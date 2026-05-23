@@ -242,7 +242,7 @@ async function runDigest() {
 // ─── Entry point ──────────────────────────────────────────────────────────────
 const args = process.argv.slice(2);
 
-if (args.includes("--now")) {
+if (process.env.RUN_NOW === "true") {
   // Run immediately (for testing)
   runDigest();
 } else {
@@ -252,7 +252,7 @@ if (args.includes("--now")) {
   console.log(`   Cron: ${cronExpr}`);
   console.log(`   Recipient: ${CONFIG.recipientEmail}`);
   console.log(`   Topics: ${CONFIG.topics.join(", ")}`);
-  console.log(`\n   Run "node digest.js --now" to test immediately.\n`);
+  console.log(`\n   Set RUN_NOW=true to test immediately.\n`);
 
   cron.schedule(cronExpr, runDigest, { timezone: CONFIG.timezone });
 }
