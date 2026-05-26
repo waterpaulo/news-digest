@@ -2,27 +2,62 @@
  * Daily News Digest — Automated
  * Fetches French & world news via Claude AI (with web search),
  * formats a rich HTML email, and sends it via Gmail OAuth2.
+ * Includes 7-day memory to avoid repeating headlines.
  */
 
 require("dotenv").config();
 const cron = require("node-cron");
 const { google } = require("googleapis");
+const fs = require("fs");
+const path = require("path");
 
 // ─── Config (loaded from .env) ───────────────────────────────────────────────
 const CONFIG = {
   recipientEmail: process.env.RECIPIENT_EMAIL,
-  sendTime: process.env.SEND_TIME || "07:00",       // HH:MM in local TZ
+  sendTime: process.env.SEND_TIME || "07:00",
   timezone: process.env.TIMEZONE || "Europe/Paris",
-  language: process.env.LANGUAGE || "fr",           // fr | en | both
-  summaryLength: process.env.SUMMARY_LENGTH || "concise", // concise | detailed
+  language: process.env.LANGUAGE || "fr",
+  summaryLength: process.env.SUMMARY_LENGTH || "concise",
   topics: (process.env.TOPICS || "General news,Politics,Tech & Science,Business,Culture & Sports").split(","),
   anthropicKey: process.env.ANTHROPIC_API_KEY,
-  // Gmail OAuth2
   gmailClientId: process.env.GMAIL_CLIENT_ID,
   gmailClientSecret: process.env.GMAIL_CLIENT_SECRET,
   gmailRefreshToken: process.env.GMAIL_REFRESH_TOKEN,
   senderEmail: process.env.SENDER_EMAIL,
 };
+
+// ─── Memory: store & load past headlines (last 7 days) ───────────────────────
+const MEMORY_FILE = path.join("/tmp", "digest_memory.json");
+const MEMORY_DAYS = 7;
+
+function loadMemory() {
+  try {
+    if (fs.existsSync(MEMORY_FILE)) {
+      const data = JSON.parse(fs.readFileSync(MEMORY_FILE, "utf8"));
+      // Only keep last MEMORY_DAYS days
+      const cutoff = Date.now() - MEMORY_DAYS * 24 * 60 * 60 * 1000;
+      return data.filter((entry) => entry.timestamp > cutoff);
+    }
+  } catch (e) {
+    console.log("  ⚠ Could not load memory, starting fresh.");
+  }
+  return [];
+}
+
+function saveMemory(memory, newTitles) {
+  const now = Date.now();
+  const newEntries = newTitles.map((title) => ({ title, timestamp: now }));
+  const updated = [...memory, ...newEntries];
+  // Keep only last MEMORY_DAYS days
+  const cutoff = now - MEMORY_DAYS * 24 * 60 * 60 * 1000;
+  const trimmed = updated.filter((e) => e.timestamp > cutoff);
+  try {
+    fs.writeFileSync(MEMORY_FILE, JSON.stringify(trimmed, null, 2));
+    console.log(`  ✓ Memory updated (${trimmed.length} headlines stored)`);
+  } catch (e) {
+    console.log("  ⚠ Could not save memory:", e.message);
+  }
+}
 
 // ─── Cron schedule from SEND_TIME ────────────────────────────────────────────
 function buildCron(timeStr) {
@@ -31,7 +66,7 @@ function buildCron(timeStr) {
 }
 
 // ─── Step 1: Fetch news via Claude + web search ───────────────────────────────
-async function fetchDigest() {
+async function fetchDigest(pastHeadlines) {
   const langLabel =
     CONFIG.language === "fr" ? "French"
     : CONFIG.language === "en" ? "English"
@@ -42,10 +77,14 @@ async function fetchDigest() {
     timeZone: CONFIG.timezone,
   });
 
+  const exclusionBlock = pastHeadlines.length > 0
+    ? `\nIMPORTANT — Do NOT include any story that is the same or very similar to these headlines from the past ${MEMORY_DAYS} days:\n${pastHeadlines.map((t) => `- ${t}`).join("\n")}\nPrioritize fresh, new developments only.\n`
+    : "";
+
   const prompt = `You are a professional news editor creating a ${CONFIG.summaryLength} daily digest for ${today}.
 
 Search the web for today's top news from France and worldwide covering these topics: ${CONFIG.topics.join(", ")}.
-
+${exclusionBlock}
 Return ONLY valid JSON — no markdown, no preamble, no backticks — in exactly this structure:
 {
   "date": "${today}",
@@ -70,7 +109,8 @@ Rules:
 - geo must be exactly "france" or "world"
 - Use ${langLabel} for all titles and summaries
 - Keep summaries neutral and factual
-- Include real source names and URLs when available`;
+- Include real source names and URLs when available
+- Every story must be genuinely new today`;
 
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
@@ -78,7 +118,6 @@ Rules:
       "Content-Type": "application/json",
       "x-api-key": CONFIG.anthropicKey,
       "anthropic-version": "2023-06-01",
-      "anthropic-beta": "interleaved-thinking-2025-05-14",
     },
     body: JSON.stringify({
       model: "claude-sonnet-4-5",
@@ -146,7 +185,7 @@ function buildEmail(digest) {
   }).join("");
 
   return `<!DOCTYPE html>
-<html lang="fr">
+<html lang="en">
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
 <body style="margin:0;padding:0;background:#f5f5f0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
   <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f5f5f0;padding:32px 16px;">
@@ -155,7 +194,7 @@ function buildEmail(digest) {
 
         <!-- Header -->
         <tr><td style="background:#3C3489;border-radius:12px 12px 0 0;padding:28px 32px;">
-          <div style="font-size:22px;font-weight:700;color:#fff;">📰 Digest quotidien</div>
+          <div style="font-size:22px;font-weight:700;color:#fff;">📰 Daily Digest</div>
           <div style="font-size:14px;color:rgba(255,255,255,0.75);margin-top:4px;">${digest.date}</div>
         </td></tr>
 
@@ -169,8 +208,8 @@ function buildEmail(digest) {
         <!-- Footer -->
         <tr><td style="background:#f0eff8;border-radius:0 0 12px 12px;padding:16px 32px;text-align:center;">
           <p style="margin:0;font-size:12px;color:#888;">
-            Digest automatique · Topics: ${CONFIG.topics.join(" · ")}<br>
-            Envoyé à ${CONFIG.sendTime} (${CONFIG.timezone})
+            Automated digest · Topics: ${CONFIG.topics.join(" · ")}<br>
+            Sent daily at ${CONFIG.sendTime} (${CONFIG.timezone})
           </p>
         </td></tr>
 
@@ -217,18 +256,27 @@ async function sendViaGmail(subject, htmlBody) {
 
 // ─── Main job ─────────────────────────────────────────────────────────────────
 async function runDigest() {
-  const now = new Date().toLocaleString("fr-FR", { timeZone: CONFIG.timezone });
+  const now = new Date().toLocaleString("en-US", { timeZone: CONFIG.timezone });
   console.log(`\n[${now}] 🚀 Starting news digest...`);
 
   try {
+    // Load memory of past headlines
+    const memory = loadMemory();
+    const pastHeadlines = memory.map((e) => e.title);
+    console.log(`  ✓ Loaded ${pastHeadlines.length} past headlines to avoid`);
+
     console.log("  ① Fetching news via Claude + web search...");
-    const digest = await fetchDigest();
+    const digest = await fetchDigest(pastHeadlines);
     console.log(`  ✓ Got ${digest.sections.length} sections`);
+
+    // Extract new titles and save to memory
+    const newTitles = digest.sections.flatMap((s) => s.items.map((i) => i.title));
+    saveMemory(memory, newTitles);
 
     console.log("  ② Building HTML email...");
     const html = buildEmail(digest);
 
-    const subject = `📰 Digest — ${digest.date}`;
+    const subject = `📰 Daily Digest — ${digest.date}`;
     console.log("  ③ Sending via Gmail...");
     await sendViaGmail(subject, html);
 
@@ -240,19 +288,15 @@ async function runDigest() {
 }
 
 // ─── Entry point ──────────────────────────────────────────────────────────────
-const args = process.argv.slice(2);
-
 if (process.env.RUN_NOW === "true") {
-  // Run immediately (for testing)
   runDigest();
 } else {
-  // Schedule daily
   const cronExpr = buildCron(CONFIG.sendTime);
   console.log(`📅 Digest scheduled at ${CONFIG.sendTime} (${CONFIG.timezone})`);
   console.log(`   Cron: ${cronExpr}`);
   console.log(`   Recipient: ${CONFIG.recipientEmail}`);
   console.log(`   Topics: ${CONFIG.topics.join(", ")}`);
-  console.log(`\n   Set RUN_NOW=true to test immediately.\n`);
+  console.log(`   Memory: last ${MEMORY_DAYS} days of headlines tracked\n`);
 
   cron.schedule(cronExpr, runDigest, { timezone: CONFIG.timezone });
 }
