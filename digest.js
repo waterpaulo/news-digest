@@ -305,7 +305,14 @@ async function runDigest() {
 
 // ─── Entry point ──────────────────────────────────────────────────────────────
 if (process.env.RUN_NOW === "true") {
-  runDigest();
+  // Run once then switch to normal daily schedule so Railway doesn't restart loop
+  runDigest().then(() => {
+    console.log("\n✓ Test run complete. Switching to daily schedule...");
+    const cronExpr = buildCron(CONFIG.sendTime);
+    console.log(`📅 Digest scheduled at ${CONFIG.sendTime} (${CONFIG.timezone})`);
+    console.log(`   Next send: tomorrow at ${CONFIG.sendTime}\n`);
+    cron.schedule(cronExpr, runDigest, { timezone: CONFIG.timezone });
+  });
 } else {
   const cronExpr = buildCron(CONFIG.sendTime);
   console.log(`📅 Digest scheduled at ${CONFIG.sendTime} (${CONFIG.timezone})`);
