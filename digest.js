@@ -254,6 +254,20 @@ async function sendViaGmail(subject, htmlBody) {
   });
 }
 
+// ─── Retry helper ────────────────────────────────────────────────────────────
+async function withRetry(fn, retries = 3, delayMs = 10000) {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (attempt === retries) throw err;
+      console.log(`  ⚠ Attempt ${attempt} failed: ${err.message}`);
+      console.log(`  ↻ Retrying in ${delayMs / 1000}s... (${attempt}/${retries})`);
+      await new Promise((res) => setTimeout(res, delayMs));
+    }
+  }
+}
+
 // ─── Main job ─────────────────────────────────────────────────────────────────
 async function runDigest() {
   const now = new Date().toLocaleString("en-US", { timeZone: CONFIG.timezone });
@@ -266,7 +280,7 @@ async function runDigest() {
     console.log(`  ✓ Loaded ${pastHeadlines.length} past headlines to avoid`);
 
     console.log("  ① Fetching news via Claude + web search...");
-    const digest = await fetchDigest(pastHeadlines);
+    const digest = await withRetry(() => fetchDigest(pastHeadlines));
     console.log(`  ✓ Got ${digest.sections.length} sections`);
 
     // Extract new titles and save to memory
@@ -278,12 +292,13 @@ async function runDigest() {
 
     const subject = `📰 Daily Digest — ${digest.date}`;
     console.log("  ③ Sending via Gmail...");
-    await sendViaGmail(subject, html);
+    await withRetry(() => sendViaGmail(subject, html));
 
     console.log(`  ✓ Digest sent to ${CONFIG.recipientEmail}`);
   } catch (err) {
-    console.error("  ✗ Error:", err.message);
-    process.exit(1);
+    // Log error but do NOT exit — keep the scheduler alive for tomorrow
+    console.error(`  ✗ Failed after all retries: ${err.message}`);
+    console.error("  ℹ Scheduler still running — will retry tomorrow.");
   }
 }
 
