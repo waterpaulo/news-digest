@@ -14,10 +14,10 @@ const path = require("path");
 // ─── Config (loaded from .env) ───────────────────────────────────────────────
 const CONFIG = {
   recipientEmail: process.env.RECIPIENT_EMAIL,
-  sendTime: process.env.SEND_TIME || "07:00",
-  timezone: process.env.TIMEZONE || "Europe/Paris",
-  language: process.env.LANGUAGE || "fr",
-  summaryLength: process.env.SUMMARY_LENGTH || "concise",
+  sendTime: process.env.SEND_TIME || "08:30",
+  timezone: process.env.TIMEZONE || "America/New_York",
+  language: process.env.LANGUAGE || "en",
+  summaryLength: process.env.SUMMARY_LENGTH || "detailed",
   topics: (process.env.TOPICS || "General news,Politics,Tech & Science,Business,Culture & Sports").split(","),
   anthropicKey: process.env.ANTHROPIC_API_KEY,
   gmailClientId: process.env.GMAIL_CLIENT_ID,
@@ -105,9 +105,10 @@ Return ONLY valid JSON — no markdown, no preamble, no backticks — in exactly
 }
 
 Rules:
-- Include 3-5 items per topic section
+- Include 4-5 items per topic section
 - geo must be exactly "france" or "world"
 - Use ${langLabel} for all titles and summaries
+- Each summary must be 3-4 sentences with context, background, and significance (detailed 10-min read)
 - Keep summaries neutral and factual
 - Include real source names and URLs when available
 - Every story must be genuinely new today`;
