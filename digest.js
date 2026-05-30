@@ -1,7 +1,8 @@
 /**
  * Daily News Digest — Automated
- * One focused web search per topic (accurate, rate-limit safe),
- * summarized by Claude Sonnet, sent via Gmail OAuth2.
+ * 2 focused web searches (France + World) via Claude Sonnet,
+ * summarized by Claude Haiku (cheap), sent via Gmail OAuth2.
+ * Cost: ~$0.03/day (~$1/month)
  */
 
 require("dotenv").config();
@@ -46,37 +47,126 @@ function saveMemory(memory, newTitles) {
   } catch (e) {}
 }
 
-// ─── Sleep helper ─────────────────────────────────────────────────────────────
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// ─── Fetch one topic via Claude + web search ──────────────────────────────────
-async function fetchTopic(topic, pastTitles, today) {
+// ─── Step 1: 2 web searches — France news + World news ───────────────────────
+async function fetchRawNews(pastTitles, today) {
   const exclusion = pastTitles.length > 0
-    ? `Avoid these recent stories: ${pastTitles.slice(0, 10).join("; ")}.`
+    ? `Avoid these recent stories: ${pastTitles.slice(0, 8).join("; ")}.`
     : "";
 
-  const isfrench = topic === "General news" ? "Include both French and world news." : "";
-  const geoHint = ["Politics", "General news"].includes(topic)
-    ? "Include at least one story from France."
-    : "";
-
-  const prompt = `Search the web for today's top 3 news stories about "${topic}" (${today}).
-${isfrench} ${geoHint} ${exclusion}
-
-Return ONLY valid JSON, no markdown, no explanation:
-{
-  "items": [
+  const searches = [
     {
-      "title": "Headline",
-      "summary": "2-3 sentence summary with key facts and context.",
-      "geo": "france",
-      "source": "Source name",
-      "url": "https://..."
+      label: "France",
+      prompt: `Search for today's top 6 news headlines from France (${today}) covering: politics, economy, general news, culture. ${exclusion}
+Return ONLY a JSON array, no markdown:
+[{"title":"headline","description":"1 sentence description","source":"source name","url":"https://...","topic":"Politics"}]
+Topics must be one of: General news, Politics, Business, Culture & Sports. JSON array only.`
+    },
+    {
+      label: "World",
+      prompt: `Search for today's top 6 world news headlines (${today}) covering: tech, science, business, international politics, culture. ${exclusion}
+Return ONLY a JSON array, no markdown:
+[{"title":"headline","description":"1 sentence description","source":"source name","url":"https://...","topic":"Tech & Science"}]
+Topics must be one of: General news, Politics, Tech & Science, Business, Culture & Sports. JSON array only.`
     }
-  ]
+  ];
+
+  const allItems = [];
+
+  for (const search of searches) {
+    console.log(`  Searching: ${search.label} news...`);
+    try {
+      const res = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": CONFIG.anthropicKey,
+          "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-6",
+          max_tokens: 1000,
+          tools: [{ type: "web_search_20250305", name: "web_search" }],
+          messages: [{ role: "user", content: search.prompt }],
+        }),
+      });
+
+      if (!res.ok) throw new Error(`API ${res.status}: ${await res.text()}`);
+      const data = await res.json();
+
+      let jsonText = data.content.filter((b) => b.type === "text").map((b) => b.text).join("");
+      jsonText = jsonText.replace(/```json|```/g, "").trim();
+      const start = jsonText.indexOf("[");
+      const end = jsonText.lastIndexOf("]");
+      if (start === -1 || end === -1) throw new Error("No JSON array in response");
+
+      const items = JSON.parse(jsonText.slice(start, end + 1));
+      const geo = search.label === "France" ? "france" : "world";
+      allItems.push(...items.map((i) => ({ ...i, geo })));
+      console.log(`  ✓ ${search.label}: ${items.length} headlines`);
+    } catch (e) {
+      console.log(`  ✗ ${search.label}: ${e.message}`);
+    }
+
+    // Wait 20s between the 2 searches
+    if (search.label === "France") {
+      console.log("  Waiting 20s...");
+      await sleep(20000);
+    }
+  }
+
+  return allItems;
 }
 
-Rules: geo must be "france" or "world". 3 items. Real news from today or yesterday. JSON only.`;
+// ─── Step 2: Summarize with Haiku (cheapest model) ───────────────────────────
+async function summarizeWithHaiku(rawItems, today) {
+  // Group by topic
+  const byTopic = {};
+  for (const item of rawItems) {
+    const topic = item.topic || "General news";
+    if (!byTopic[topic]) byTopic[topic] = [];
+    if (byTopic[topic].length < 3) byTopic[topic].push(item);
+  }
+
+  // Fill missing topics with items from General news
+  for (const topic of CONFIG.topics) {
+    if (!byTopic[topic] || byTopic[topic].length === 0) {
+      byTopic[topic] = (byTopic["General news"] || []).slice(0, 2);
+    }
+  }
+
+  const inputText = CONFIG.topics
+    .filter((t) => byTopic[t]?.length > 0)
+    .map((topic) =>
+      `TOPIC: ${topic}\n` +
+      byTopic[topic].map((i, n) =>
+        `${n + 1}. [${i.geo}] ${i.source}: ${i.title}. ${i.description || ""}`
+      ).join("\n")
+    ).join("\n\n");
+
+  const prompt = `Write a 2-3 sentence news summary for each item below. Be factual, clear, and informative.
+
+${inputText}
+
+Return ONLY valid JSON:
+{
+  "date": "${today}",
+  "sections": [
+    {
+      "topic": "Topic name",
+      "items": [
+        {
+          "title": "original headline",
+          "summary": "2-3 sentence summary with key facts and why it matters.",
+          "geo": "france or world",
+          "source": "source name",
+          "url": "url or empty string"
+        }
+      ]
+    }
+  ]
+}`;
 
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
@@ -86,63 +176,26 @@ Rules: geo must be "france" or "world". 3 items. Real news from today or yesterd
       "anthropic-version": "2023-06-01",
     },
     body: JSON.stringify({
-      model: "claude-sonnet-4-5",
-      max_tokens: 800,
-      tools: [{ type: "web_search_20250305", name: "web_search" }],
+      model: "claude-haiku-4-5-20251001",
+      max_tokens: 2000,
       messages: [{ role: "user", content: prompt }],
     }),
   });
 
-  if (!res.ok) {
-    const err = await res.text();
-    throw new Error(`API error ${res.status}: ${err}`);
-  }
-
+  if (!res.ok) throw new Error(`Haiku API error: ${res.status} ${await res.text()}`);
   const data = await res.json();
+
   let jsonText = data.content.filter((b) => b.type === "text").map((b) => b.text).join("");
+  console.log("  Haiku response length:", jsonText.length);
   jsonText = jsonText.replace(/```json|```/g, "").trim();
   const start = jsonText.indexOf("{");
   const end = jsonText.lastIndexOf("}");
-  if (start === -1 || end === -1) throw new Error("No JSON for topic: " + topic);
+  if (start === -1 || end === -1) throw new Error("No JSON from Haiku: " + jsonText.slice(0, 200));
 
-  const parsed = JSON.parse(jsonText.slice(start, end + 1));
-  return parsed.items || [];
+  return JSON.parse(jsonText.slice(start, end + 1));
 }
 
-// ─── Fetch all topics sequentially (rate-limit safe) ─────────────────────────
-async function fetchAllTopics(pastTitles) {
-  const today = new Date().toLocaleDateString("en-US", {
-    weekday: "long", year: "numeric", month: "long", day: "numeric",
-    timeZone: CONFIG.timezone,
-  });
-
-  const sections = [];
-
-  for (const topic of CONFIG.topics) {
-    console.log(`  Fetching: ${topic}...`);
-    try {
-      const items = await fetchTopic(topic, pastTitles, today);
-      if (items.length > 0) {
-        sections.push({ topic, items });
-        console.log(`  ✓ ${topic}: ${items.length} stories`);
-      }
-    } catch (e) {
-      console.log(`  ✗ ${topic}: ${e.message}`);
-    }
-    // Wait 25s between topics to stay well under rate limits
-    if (CONFIG.topics.indexOf(topic) < CONFIG.topics.length - 1) {
-      console.log(`  Waiting 25s before next topic...`);
-      await sleep(25000);
-    }
-  }
-
-  return {
-    date: today,
-    sections,
-  };
-}
-
-// ─── Build HTML email ─────────────────────────────────────────────────────────
+// ─── Step 3: Build HTML email ─────────────────────────────────────────────────
 function buildEmail(digest) {
   const topicIcons = {
     "General news": "📰", "Politics": "🏛️",
@@ -193,7 +246,7 @@ function buildEmail(digest) {
 </body></html>`;
 }
 
-// ─── Send via Gmail OAuth2 ────────────────────────────────────────────────────
+// ─── Step 4: Send via Gmail OAuth2 ───────────────────────────────────────────
 async function sendViaGmail(subject, htmlBody) {
   const oauth2Client = new google.auth.OAuth2(
     CONFIG.gmailClientId, CONFIG.gmailClientSecret,
@@ -224,23 +277,32 @@ async function main() {
   const now = new Date().toLocaleString("en-US", { timeZone: CONFIG.timezone });
   console.log(`[${now}] Starting news digest...`);
 
+  const today = new Date().toLocaleDateString("en-US", {
+    weekday: "long", year: "numeric", month: "long", day: "numeric",
+    timeZone: CONFIG.timezone,
+  });
+
   const memory = loadMemory();
   const pastTitles = memory.map((e) => e.title);
   console.log(`  Loaded ${pastTitles.length} past headlines to avoid`);
 
-  console.log(`  Fetching ${CONFIG.topics.length} topics (15s apart to avoid rate limits)...`);
-  const digest = await fetchAllTopics(pastTitles);
-  console.log(`  Got ${digest.sections.length} sections`);
+  // Step 1: 2 web searches (Sonnet with web search)
+  console.log("  Step 1: Fetching headlines via web search...");
+  const rawItems = await fetchRawNews(pastTitles, today);
+  console.log(`  Got ${rawItems.length} raw headlines`);
+  if (rawItems.length === 0) throw new Error("No headlines fetched");
 
-  if (digest.sections.length === 0) throw new Error("No sections fetched");
+  // Step 2: Summarize (Haiku, no web search = cheap)
+  console.log("  Step 2: Summarizing with Haiku...");
+  const digest = await summarizeWithHaiku(rawItems, today);
+  console.log(`  Got ${digest.sections.length} sections`);
 
   const newTitles = digest.sections.flatMap((s) => s.items.map((i) => i.title));
   saveMemory(memory, newTitles);
 
-  console.log("  Building HTML email...");
+  // Step 3: Send
+  console.log("  Step 3: Building & sending email...");
   const html = buildEmail(digest);
-
-  console.log("  Sending via Gmail...");
   await sendViaGmail(`📰 Daily Digest — ${digest.date}`, html);
 
   console.log(`  Done! Sent to ${CONFIG.recipientEmail}`);
