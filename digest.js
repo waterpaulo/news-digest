@@ -1,20 +1,18 @@
 /**
  * Daily News Digest — Automated
- * Fetches French & world news via Claude AI (with web search),
+ * Fetches news via Claude AI (with web search),
  * formats a rich HTML email, and sends it via Gmail OAuth2.
- * Includes 7-day memory to avoid repeating headlines.
+ * Designed to be triggered by Railway Cron Job.
  */
 
 require("dotenv").config();
-const cron = require("node-cron");
 const { google } = require("googleapis");
 const fs = require("fs");
 const path = require("path");
 
-// ─── Config (loaded from .env) ───────────────────────────────────────────────
+// ─── Config ───────────────────────────────────────────────────────────────────
 const CONFIG = {
   recipientEmail: process.env.RECIPIENT_EMAIL,
-  sendTime: process.env.SEND_TIME || "08:30",
   timezone: process.env.TIMEZONE || "America/New_York",
   language: process.env.LANGUAGE || "en",
   summaryLength: process.env.SUMMARY_LENGTH || "detailed",
@@ -34,12 +32,11 @@ function loadMemory() {
   try {
     if (fs.existsSync(MEMORY_FILE)) {
       const data = JSON.parse(fs.readFileSync(MEMORY_FILE, "utf8"));
-      // Only keep last MEMORY_DAYS days
       const cutoff = Date.now() - MEMORY_DAYS * 24 * 60 * 60 * 1000;
       return data.filter((entry) => entry.timestamp > cutoff);
     }
   } catch (e) {
-    console.log("  ⚠ Could not load memory, starting fresh.");
+    console.log("  Could not load memory, starting fresh.");
   }
   return [];
 }
@@ -48,29 +45,19 @@ function saveMemory(memory, newTitles) {
   const now = Date.now();
   const newEntries = newTitles.map((title) => ({ title, timestamp: now }));
   const updated = [...memory, ...newEntries];
-  // Keep only last MEMORY_DAYS days
   const cutoff = now - MEMORY_DAYS * 24 * 60 * 60 * 1000;
   const trimmed = updated.filter((e) => e.timestamp > cutoff);
   try {
     fs.writeFileSync(MEMORY_FILE, JSON.stringify(trimmed, null, 2));
-    console.log(`  ✓ Memory updated (${trimmed.length} headlines stored)`);
+    console.log(`  Memory updated (${trimmed.length} headlines stored)`);
   } catch (e) {
-    console.log("  ⚠ Could not save memory:", e.message);
+    console.log("  Could not save memory:", e.message);
   }
 }
 
-// ─── Cron schedule from SEND_TIME ────────────────────────────────────────────
-function buildCron(timeStr) {
-  const [h, m] = timeStr.split(":").map(Number);
-  return `${m} ${h} * * *`;
-}
-
-// ─── Step 1: Fetch news via Claude + web search ───────────────────────────────
+// ─── Fetch news via Claude + web search ──────────────────────────────────────
 async function fetchDigest(pastHeadlines) {
-  const langLabel =
-    CONFIG.language === "fr" ? "French"
-    : CONFIG.language === "en" ? "English"
-    : "French and English";
+  const langLabel = CONFIG.language === "fr" ? "French" : CONFIG.language === "en" ? "English" : "French and English";
 
   const today = new Date().toLocaleDateString("en-US", {
     weekday: "long", year: "numeric", month: "long", day: "numeric",
@@ -78,14 +65,14 @@ async function fetchDigest(pastHeadlines) {
   });
 
   const exclusionBlock = pastHeadlines.length > 0
-    ? `\nIMPORTANT — Do NOT include any story that is the same or very similar to these headlines from the past ${MEMORY_DAYS} days:\n${pastHeadlines.map((t) => `- ${t}`).join("\n")}\nPrioritize fresh, new developments only.\n`
+    ? `Do NOT repeat these recent headlines:\n${pastHeadlines.map((t) => `- ${t}`).join("\n")}\n`
     : "";
 
   const prompt = `You are a news digest assistant. Search the web for the most recent news from France and worldwide on these topics: ${CONFIG.topics.join(", ")}.
 
-Use the most recent articles you can find — from the past 48 hours is fine.
+Use the most recent articles you can find from the past 48 hours.
 ${exclusionBlock}
-You MUST respond with ONLY a valid JSON object. Do not write any explanation, apology, or text outside the JSON. If you cannot find news for a topic, include placeholder items. Always return JSON.
+You MUST respond with ONLY a valid JSON object. Do not write any explanation, apology, or text outside the JSON. Always return JSON no matter what.
 
 Format:
 {
@@ -96,7 +83,7 @@ Format:
       "items": [
         {
           "title": "Headline",
-          "summary": "Two sentence summary with context.",
+          "summary": "Two to three sentence summary with context and significance.",
           "geo": "france",
           "source": "Source name",
           "url": "https://example.com"
@@ -110,7 +97,7 @@ Rules:
 - geo = "france" for French news, "world" for international
 - 3 items per section
 - All text in ${langLabel}
-- Valid JSON only — no prose, no apologies, no markdown`;
+- Valid JSON only, no prose, no apologies, no markdown`;
 
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
@@ -121,7 +108,7 @@ Rules:
     },
     body: JSON.stringify({
       model: "claude-sonnet-4-5",
-      max_tokens: 1500,
+      max_tokens: 2000,
       tools: [{ type: "web_search_20250305", name: "web_search" }],
       messages: [{ role: "user", content: prompt }],
     }),
@@ -135,36 +122,23 @@ Rules:
     if (block.type === "text") jsonText += block.text;
   }
 
-  // Log raw response for debugging
-  console.log("  📋 Raw response length:", jsonText.length);
-  console.log("  📋 First 300 chars:", jsonText.slice(0, 300));
-
+  console.log("  Raw response length:", jsonText.length);
   jsonText = jsonText.replace(/```json|```/g, "").trim();
   const start = jsonText.indexOf("{");
   const end = jsonText.lastIndexOf("}");
   if (start === -1 || end === -1) {
-    console.log("  📋 Full response:", jsonText.slice(0, 500));
+    console.log("  Full response:", jsonText.slice(0, 300));
     throw new Error("No JSON found in response");
   }
 
-  const jsonSlice = jsonText.slice(start, end + 1);
-  try {
-    return JSON.parse(jsonSlice);
-  } catch(parseErr) {
-    console.log("  📋 JSON parse error at:", parseErr.message);
-    console.log("  📋 JSON around error:", jsonSlice.slice(Math.max(0, parseInt(parseErr.message.match(/position (\d+)/)?.[1] || 0) - 50), parseInt(parseErr.message.match(/position (\d+)/)?.[1] || 0) + 50));
-    throw parseErr;
-  }
+  return JSON.parse(jsonText.slice(start, end + 1));
 }
 
-// ─── Step 2: Build HTML email ─────────────────────────────────────────────────
+// ─── Build HTML email ─────────────────────────────────────────────────────────
 function buildEmail(digest) {
   const topicIcons = {
-    "General news": "📰",
-    "Politics": "🏛️",
-    "Tech & Science": "🔬",
-    "Business": "📈",
-    "Culture & Sports": "🎭",
+    "General news": "📰", "Politics": "🏛️",
+    "Tech & Science": "🔬", "Business": "📈", "Culture & Sports": "🎭",
   };
 
   const sectionHtml = digest.sections.map((section) => {
@@ -175,74 +149,49 @@ function buildEmail(digest) {
         ? `<a href="${item.url}" style="color:#3C3489;text-decoration:none;">${item.title}</a>`
         : item.title;
       return `
-        <tr>
-          <td style="padding:12px 0;border-bottom:1px solid #f0f0f0;">
-            <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
-              <span style="font-size:11px;background:${item.geo === "france" ? "#E6F1FB" : "#EAF3DE"};color:${item.geo === "france" ? "#0C447C" : "#27500A"};padding:2px 8px;border-radius:10px;font-weight:500;">${geoLabel}</span>
-              <span style="font-size:11px;color:#888;">${item.source || ""}</span>
-            </div>
-            <div style="font-weight:600;font-size:15px;color:#1a1a1a;margin-bottom:4px;">${titleHtml}</div>
-            <div style="font-size:14px;color:#555;line-height:1.6;">${item.summary}</div>
-          </td>
-        </tr>`;
+        <tr><td style="padding:12px 0;border-bottom:1px solid #f0f0f0;">
+          <div style="margin-bottom:4px;">
+            <span style="font-size:11px;background:${item.geo === "france" ? "#E6F1FB" : "#EAF3DE"};color:${item.geo === "france" ? "#0C447C" : "#27500A"};padding:2px 8px;border-radius:10px;font-weight:500;">${geoLabel}</span>
+            <span style="font-size:11px;color:#888;margin-left:6px;">${item.source || ""}</span>
+          </div>
+          <div style="font-weight:600;font-size:15px;color:#1a1a1a;margin-bottom:4px;">${titleHtml}</div>
+          <div style="font-size:14px;color:#555;line-height:1.6;">${item.summary}</div>
+        </td></tr>`;
     }).join("");
-
     return `
       <tr><td style="padding:24px 0 8px;">
         <h2 style="margin:0;font-size:17px;color:#1a1a1a;font-weight:600;">${icon} ${section.topic}</h2>
       </td></tr>
-      <tr><td>
-        <table width="100%" cellpadding="0" cellspacing="0" border="0">
-          ${itemsHtml}
-        </table>
-      </td></tr>`;
+      <tr><td><table width="100%" cellpadding="0" cellspacing="0" border="0">${itemsHtml}</table></td></tr>`;
   }).join("");
 
   return `<!DOCTYPE html>
-<html lang="en">
-<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
 <body style="margin:0;padding:0;background:#f5f5f0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
   <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f5f5f0;padding:32px 16px;">
-    <tr><td>
-      <table width="600" cellpadding="0" cellspacing="0" border="0" align="center" style="max-width:600px;width:100%;">
-
-        <!-- Header -->
-        <tr><td style="background:#3C3489;border-radius:12px 12px 0 0;padding:28px 32px;">
-          <div style="font-size:22px;font-weight:700;color:#fff;">📰 Daily Digest</div>
-          <div style="font-size:14px;color:rgba(255,255,255,0.75);margin-top:4px;">${digest.date}</div>
-        </td></tr>
-
-        <!-- Body -->
-        <tr><td style="background:#fff;padding:8px 32px 24px;">
-          <table width="100%" cellpadding="0" cellspacing="0" border="0">
-            ${sectionHtml}
-          </table>
-        </td></tr>
-
-        <!-- Footer -->
-        <tr><td style="background:#f0eff8;border-radius:0 0 12px 12px;padding:16px 32px;text-align:center;">
-          <p style="margin:0;font-size:12px;color:#888;">
-            Automated digest · Topics: ${CONFIG.topics.join(" · ")}<br>
-            Sent daily at ${CONFIG.sendTime} (${CONFIG.timezone})
-          </p>
-        </td></tr>
-
-      </table>
-    </td></tr>
+    <tr><td><table width="600" cellpadding="0" cellspacing="0" border="0" align="center" style="max-width:600px;width:100%;">
+      <tr><td style="background:#3C3489;border-radius:12px 12px 0 0;padding:28px 32px;">
+        <div style="font-size:22px;font-weight:700;color:#fff;">📰 Daily Digest</div>
+        <div style="font-size:14px;color:rgba(255,255,255,0.75);margin-top:4px;">${digest.date}</div>
+      </td></tr>
+      <tr><td style="background:#fff;padding:8px 32px 24px;">
+        <table width="100%" cellpadding="0" cellspacing="0" border="0">${sectionHtml}</table>
+      </td></tr>
+      <tr><td style="background:#f0eff8;border-radius:0 0 12px 12px;padding:16px 32px;text-align:center;">
+        <p style="margin:0;font-size:12px;color:#888;">Automated digest · ${CONFIG.topics.join(" · ")}</p>
+      </td></tr>
+    </table></td></tr>
   </table>
-</body>
-</html>`;
+</body></html>`;
 }
 
-// ─── Step 3: Send via Gmail OAuth2 ───────────────────────────────────────────
+// ─── Send via Gmail OAuth2 ────────────────────────────────────────────────────
 async function sendViaGmail(subject, htmlBody) {
   const oauth2Client = new google.auth.OAuth2(
-    CONFIG.gmailClientId,
-    CONFIG.gmailClientSecret,
+    CONFIG.gmailClientId, CONFIG.gmailClientSecret,
     "https://developers.google.com/oauthplayground"
   );
   oauth2Client.setCredentials({ refresh_token: CONFIG.gmailRefreshToken });
-
   const gmail = google.gmail({ version: "v1", auth: oauth2Client });
 
   const message = [
@@ -256,83 +205,39 @@ async function sendViaGmail(subject, htmlBody) {
     Buffer.from(htmlBody).toString("base64"),
   ].join("\r\n");
 
-  const encoded = Buffer.from(message)
-    .toString("base64")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/, "");
+  const encoded = Buffer.from(message).toString("base64")
+    .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 
-  await gmail.users.messages.send({
-    userId: "me",
-    requestBody: { raw: encoded },
-  });
+  await gmail.users.messages.send({ userId: "me", requestBody: { raw: encoded } });
 }
 
-// ─── Retry helper ────────────────────────────────────────────────────────────
-async function withRetry(fn, retries = 3, delayMs = 60000) {
-  for (let attempt = 1; attempt <= retries; attempt++) {
-    try {
-      return await fn();
-    } catch (err) {
-      if (attempt === retries) throw err;
-      console.log(`  ⚠ Attempt ${attempt} failed: ${err.message}`);
-      console.log(`  ↻ Retrying in ${delayMs / 1000}s... (${attempt}/${retries})`);
-      await new Promise((res) => setTimeout(res, delayMs));
-    }
-  }
-}
-
-// ─── Main job ─────────────────────────────────────────────────────────────────
-async function runDigest() {
+// ─── Main ─────────────────────────────────────────────────────────────────────
+async function main() {
   const now = new Date().toLocaleString("en-US", { timeZone: CONFIG.timezone });
-  console.log(`\n[${now}] 🚀 Starting news digest...`);
+  console.log(`[${now}] Starting news digest...`);
 
-  try {
-    // Load memory of past headlines
-    const memory = loadMemory();
-    const pastHeadlines = memory.map((e) => e.title);
-    console.log(`  ✓ Loaded ${pastHeadlines.length} past headlines to avoid`);
+  const memory = loadMemory();
+  const pastHeadlines = memory.map((e) => e.title);
+  console.log(`  Loaded ${pastHeadlines.length} past headlines to avoid`);
 
-    console.log("  ① Fetching news via Claude + web search...");
-    const digest = await withRetry(() => fetchDigest(pastHeadlines));
-    console.log(`  ✓ Got ${digest.sections.length} sections`);
+  console.log("  Fetching news via Claude + web search...");
+  const digest = await fetchDigest(pastHeadlines);
+  console.log(`  Got ${digest.sections.length} sections`);
 
-    // Extract new titles and save to memory
-    const newTitles = digest.sections.flatMap((s) => s.items.map((i) => i.title));
-    saveMemory(memory, newTitles);
+  const newTitles = digest.sections.flatMap((s) => s.items.map((i) => i.title));
+  saveMemory(memory, newTitles);
 
-    console.log("  ② Building HTML email...");
-    const html = buildEmail(digest);
+  console.log("  Building HTML email...");
+  const html = buildEmail(digest);
 
-    const subject = `📰 Daily Digest — ${digest.date}`;
-    console.log("  ③ Sending via Gmail...");
-    await withRetry(() => sendViaGmail(subject, html));
+  console.log("  Sending via Gmail...");
+  await sendViaGmail(`📰 Daily Digest — ${digest.date}`, html);
 
-    console.log(`  ✓ Digest sent to ${CONFIG.recipientEmail}`);
-  } catch (err) {
-    // Log error but do NOT exit — keep the scheduler alive for tomorrow
-    console.error(`  ✗ Failed after all retries: ${err.message}`);
-    console.error("  ℹ Scheduler still running — will retry tomorrow.");
-  }
+  console.log(`  Done! Sent to ${CONFIG.recipientEmail}`);
+  process.exit(0);
 }
 
-// ─── Entry point ──────────────────────────────────────────────────────────────
-if (process.env.RUN_NOW === "true") {
-  // Run once then switch to normal daily schedule so Railway doesn't restart loop
-  runDigest().then(() => {
-    console.log("\n✓ Test run complete. Switching to daily schedule...");
-    const cronExpr = buildCron(CONFIG.sendTime);
-    console.log(`📅 Digest scheduled at ${CONFIG.sendTime} (${CONFIG.timezone})`);
-    console.log(`   Next send: tomorrow at ${CONFIG.sendTime}\n`);
-    cron.schedule(cronExpr, runDigest, { timezone: CONFIG.timezone });
-  });
-} else {
-  const cronExpr = buildCron(CONFIG.sendTime);
-  console.log(`📅 Digest scheduled at ${CONFIG.sendTime} (${CONFIG.timezone})`);
-  console.log(`   Cron: ${cronExpr}`);
-  console.log(`   Recipient: ${CONFIG.recipientEmail}`);
-  console.log(`   Topics: ${CONFIG.topics.join(", ")}`);
-  console.log(`   Memory: last ${MEMORY_DAYS} days of headlines tracked\n`);
-
-  cron.schedule(cronExpr, runDigest, { timezone: CONFIG.timezone });
-}
+main().catch((err) => {
+  console.error("Fatal error:", err.message);
+  process.exit(1);
+});
