@@ -128,7 +128,7 @@ Important rules:
       "anthropic-version": "2023-06-01",
     },
     body: JSON.stringify({
-      model: "claude-haiku-4-5-20251001",
+      model: "claude-sonnet-4-5",
       max_tokens: 1500,
       tools: [{ type: "web_search_20250305", name: "web_search" }],
       messages: [{ role: "user", content: prompt }],
@@ -143,12 +143,26 @@ Important rules:
     if (block.type === "text") jsonText += block.text;
   }
 
+  // Log raw response for debugging
+  console.log("  📋 Raw response length:", jsonText.length);
+  console.log("  📋 First 300 chars:", jsonText.slice(0, 300));
+
   jsonText = jsonText.replace(/```json|```/g, "").trim();
   const start = jsonText.indexOf("{");
   const end = jsonText.lastIndexOf("}");
-  if (start === -1 || end === -1) throw new Error("No JSON found in response");
+  if (start === -1 || end === -1) {
+    console.log("  📋 Full response:", jsonText.slice(0, 500));
+    throw new Error("No JSON found in response");
+  }
 
-  return JSON.parse(jsonText.slice(start, end + 1));
+  const jsonSlice = jsonText.slice(start, end + 1);
+  try {
+    return JSON.parse(jsonSlice);
+  } catch(parseErr) {
+    console.log("  📋 JSON parse error at:", parseErr.message);
+    console.log("  📋 JSON around error:", jsonSlice.slice(Math.max(0, parseInt(parseErr.message.match(/position (\d+)/)?.[1] || 0) - 50), parseInt(parseErr.message.match(/position (\d+)/)?.[1] || 0) + 50));
+    throw parseErr;
+  }
 }
 
 // ─── Step 2: Build HTML email ─────────────────────────────────────────────────
