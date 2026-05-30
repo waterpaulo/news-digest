@@ -1,8 +1,7 @@
 /**
  * Daily News Digest — Automated
- * Fetches headlines via FREE RSS feeds (no token cost),
- * summarizes with Claude (minimal tokens),
- * sends via Gmail OAuth2.
+ * One focused web search per topic (accurate, rate-limit safe),
+ * summarized by Claude Sonnet, sent via Gmail OAuth2.
  */
 
 require("dotenv").config();
@@ -20,23 +19,8 @@ const CONFIG = {
   gmailClientSecret: process.env.GMAIL_CLIENT_SECRET,
   gmailRefreshToken: process.env.GMAIL_REFRESH_TOKEN,
   senderEmail: process.env.SENDER_EMAIL,
+  topics: (process.env.TOPICS || "General news,Politics,Tech & Science,Business,Culture & Sports").split(","),
 };
-
-// ─── RSS Feed Sources ─────────────────────────────────────────────────────────
-const RSS_FEEDS = [
-  // France
-  { url: "https://www.lemonde.fr/rss/une.xml",          topic: "General news",     geo: "france", source: "Le Monde" },
-  { url: "https://www.lefigaro.fr/rss/figaro_actualites.xml", topic: "General news", geo: "france", source: "Le Figaro" },
-  { url: "https://www.france24.com/fr/rss",             topic: "Politics",         geo: "france", source: "France 24" },
-  { url: "https://www.lesechos.fr/rss/rss_une.xml",     topic: "Business",         geo: "france", source: "Les Echos" },
-  // World
-  { url: "https://feeds.bbci.co.uk/news/rss.xml",       topic: "General news",     geo: "world",  source: "BBC News" },
-  { url: "https://feeds.reuters.com/reuters/topNews",   topic: "General news",     geo: "world",  source: "Reuters" },
-  { url: "https://rss.nytimes.com/services/xml/rss/nyt/World.xml", topic: "Politics", geo: "world", source: "NY Times" },
-  { url: "https://feeds.feedburner.com/TechCrunch",     topic: "Tech & Science",   geo: "world",  source: "TechCrunch" },
-  { url: "https://www.wired.com/feed/rss",              topic: "Tech & Science",   geo: "world",  source: "Wired" },
-  { url: "https://feeds.bloomberg.com/markets/news.rss",topic: "Business",         geo: "world",  source: "Bloomberg" },
-];
 
 // ─── Memory ───────────────────────────────────────────────────────────────────
 const MEMORY_FILE = path.join("/tmp", "digest_memory.json");
@@ -62,89 +46,37 @@ function saveMemory(memory, newTitles) {
   } catch (e) {}
 }
 
-// ─── Step 1: Fetch RSS headlines ──────────────────────────────────────────────
-async function fetchRSSHeadlines(pastTitles) {
-  const allItems = [];
-  const cutoff = Date.now() - 48 * 60 * 60 * 1000; // last 48 hours
+// ─── Sleep helper ─────────────────────────────────────────────────────────────
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-  for (const feed of RSS_FEEDS) {
-    try {
-      const res = await fetch(feed.url, {
-        headers: { "User-Agent": "Mozilla/5.0 (compatible; NewsDigest/1.0)" },
-        signal: AbortSignal.timeout(8000),
-      });
-      const xml = await res.text();
+// ─── Fetch one topic via Claude + web search ──────────────────────────────────
+async function fetchTopic(topic, pastTitles, today) {
+  const exclusion = pastTitles.length > 0
+    ? `Avoid these recent stories: ${pastTitles.slice(0, 10).join("; ")}.`
+    : "";
 
-      // Simple XML item parser
-      const items = [];
-      const itemMatches = xml.matchAll(/<item>([\s\S]*?)<\/item>/g);
-      for (const match of itemMatches) {
-        const block = match[1];
-        const title = block.match(/<title[^>]*><!\[CDATA\[(.*?)\]\]><\/title>|<title[^>]*>(.*?)<\/title>/)?.[1] || block.match(/<title[^>]*>(.*?)<\/title>/)?.[1] || "";
-        const desc = block.match(/<description[^>]*><!\[CDATA\[(.*?)\]\]><\/description>|<description[^>]*>(.*?)<\/description>/)?.[1] || "";
-        const link = block.match(/<link>(.*?)<\/link>|<link[^>]*href="([^"]+)"/)?.[1] || "";
-        const pubDate = block.match(/<pubDate>(.*?)<\/pubDate>/)?.[1] || "";
+  const isfrench = topic === "General news" ? "Include both French and world news." : "";
+  const geoHint = ["Politics", "General news"].includes(topic)
+    ? "Include at least one story from France."
+    : "";
 
-        const cleanTitle = title.replace(/<[^>]+>/g, "").trim();
-        const cleanDesc = desc.replace(/<[^>]+>/g, "").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').trim().slice(0, 300);
+  const prompt = `Search the web for today's top 3 news stories about "${topic}" (${today}).
+${isfrench} ${geoHint} ${exclusion}
 
-        if (!cleanTitle) continue;
-        if (pastTitles.some((t) => t.toLowerCase().includes(cleanTitle.toLowerCase().slice(0, 20)))) continue;
-
-        const pub = pubDate ? new Date(pubDate).getTime() : Date.now();
-        if (pubDate && pub < cutoff) continue;
-
-        items.push({ title: cleanTitle, description: cleanDesc, link, topic: feed.topic, geo: feed.geo, source: feed.source });
-        if (items.length >= 3) break;
-      }
-
-      allItems.push(...items);
-      console.log(`  RSS ${feed.source}: ${items.length} items`);
-    } catch (e) {
-      console.log(`  RSS ${feed.source}: failed (${e.message})`);
-    }
-  }
-
-  return allItems;
-}
-
-// ─── Step 2: Summarize with Claude (minimal tokens) ──────────────────────────
-async function summarizeWithClaude(headlines) {
-  // Group by topic
-  const byTopic = {};
-  for (const item of headlines) {
-    if (!byTopic[item.topic]) byTopic[item.topic] = [];
-    if (byTopic[item.topic].length < 3) byTopic[item.topic].push(item);
-  }
-
-  const topics = Object.keys(byTopic);
-  const inputText = topics.map((topic) =>
-    `TOPIC: ${topic}\n` + byTopic[topic].map((i, n) =>
-      `${n + 1}. [${i.geo}] ${i.source}: ${i.title}. ${i.description}`
-    ).join("\n")
-  ).join("\n\n");
-
-  const today = new Date().toLocaleDateString("en-US", {
-    weekday: "long", year: "numeric", month: "long", day: "numeric",
-    timeZone: CONFIG.timezone,
-  });
-
-  const prompt = `Summarize these news headlines into a daily digest. For each item write a clear 2-sentence summary in English.
-
-${inputText}
-
-Return ONLY valid JSON:
+Return ONLY valid JSON, no markdown, no explanation:
 {
-  "date": "${today}",
-  "sections": [
+  "items": [
     {
-      "topic": "Topic name",
-      "items": [
-        {"title": "headline", "summary": "2 sentence summary.", "geo": "france or world", "source": "source name", "url": ""}
-      ]
+      "title": "Headline",
+      "summary": "2-3 sentence summary with key facts and context.",
+      "geo": "france",
+      "source": "Source name",
+      "url": "https://..."
     }
   ]
-}`;
+}
+
+Rules: geo must be "france" or "world". 3 items. Real news from today or yesterday. JSON only.`;
 
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
@@ -154,27 +86,63 @@ Return ONLY valid JSON:
       "anthropic-version": "2023-06-01",
     },
     body: JSON.stringify({
-      model: "claude-haiku-4-5-20251001",
-      max_tokens: 1500,
+      model: "claude-sonnet-4-5",
+      max_tokens: 800,
+      tools: [{ type: "web_search_20250305", name: "web_search" }],
       messages: [{ role: "user", content: prompt }],
     }),
   });
 
-  if (!res.ok) throw new Error(`Anthropic API error: ${res.status} ${await res.text()}`);
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`API error ${res.status}: ${err}`);
+  }
+
   const data = await res.json();
-
   let jsonText = data.content.filter((b) => b.type === "text").map((b) => b.text).join("");
-  console.log("  Claude response length:", jsonText.length);
-
   jsonText = jsonText.replace(/```json|```/g, "").trim();
   const start = jsonText.indexOf("{");
   const end = jsonText.lastIndexOf("}");
-  if (start === -1 || end === -1) throw new Error("No JSON in Claude response: " + jsonText.slice(0, 200));
+  if (start === -1 || end === -1) throw new Error("No JSON for topic: " + topic);
 
-  return JSON.parse(jsonText.slice(start, end + 1));
+  const parsed = JSON.parse(jsonText.slice(start, end + 1));
+  return parsed.items || [];
 }
 
-// ─── Step 3: Build HTML email ─────────────────────────────────────────────────
+// ─── Fetch all topics sequentially (rate-limit safe) ─────────────────────────
+async function fetchAllTopics(pastTitles) {
+  const today = new Date().toLocaleDateString("en-US", {
+    weekday: "long", year: "numeric", month: "long", day: "numeric",
+    timeZone: CONFIG.timezone,
+  });
+
+  const sections = [];
+
+  for (const topic of CONFIG.topics) {
+    console.log(`  Fetching: ${topic}...`);
+    try {
+      const items = await fetchTopic(topic, pastTitles, today);
+      if (items.length > 0) {
+        sections.push({ topic, items });
+        console.log(`  ✓ ${topic}: ${items.length} stories`);
+      }
+    } catch (e) {
+      console.log(`  ✗ ${topic}: ${e.message}`);
+    }
+    // Wait 15s between topics to stay well under rate limits
+    if (CONFIG.topics.indexOf(topic) < CONFIG.topics.length - 1) {
+      console.log(`  Waiting 15s before next topic...`);
+      await sleep(15000);
+    }
+  }
+
+  return {
+    date: today,
+    sections,
+  };
+}
+
+// ─── Build HTML email ─────────────────────────────────────────────────────────
 function buildEmail(digest) {
   const topicIcons = {
     "General news": "📰", "Politics": "🏛️",
@@ -225,7 +193,7 @@ function buildEmail(digest) {
 </body></html>`;
 }
 
-// ─── Step 4: Send via Gmail OAuth2 ───────────────────────────────────────────
+// ─── Send via Gmail OAuth2 ────────────────────────────────────────────────────
 async function sendViaGmail(subject, htmlBody) {
   const oauth2Client = new google.auth.OAuth2(
     CONFIG.gmailClientId, CONFIG.gmailClientSecret,
@@ -260,15 +228,11 @@ async function main() {
   const pastTitles = memory.map((e) => e.title);
   console.log(`  Loaded ${pastTitles.length} past headlines to avoid`);
 
-  console.log("  Fetching RSS headlines...");
-  const headlines = await fetchRSSHeadlines(pastTitles);
-  console.log(`  Got ${headlines.length} total headlines from RSS`);
-
-  if (headlines.length === 0) throw new Error("No RSS headlines fetched");
-
-  console.log("  Summarizing with Claude (no web search)...");
-  const digest = await summarizeWithClaude(headlines);
+  console.log(`  Fetching ${CONFIG.topics.length} topics (15s apart to avoid rate limits)...`);
+  const digest = await fetchAllTopics(pastTitles);
   console.log(`  Got ${digest.sections.length} sections`);
+
+  if (digest.sections.length === 0) throw new Error("No sections fetched");
 
   const newTitles = digest.sections.flatMap((s) => s.items.map((i) => i.title));
   saveMemory(memory, newTitles);
