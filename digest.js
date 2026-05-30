@@ -129,10 +129,10 @@ async function fetchAllTopics(pastTitles) {
     } catch (e) {
       console.log(`  ✗ ${topic}: ${e.message}`);
     }
-    // Wait 15s between topics to stay well under rate limits
+    // Wait 25s between topics to stay well under rate limits
     if (CONFIG.topics.indexOf(topic) < CONFIG.topics.length - 1) {
-      console.log(`  Waiting 15s before next topic...`);
-      await sleep(15000);
+      console.log(`  Waiting 25s before next topic...`);
+      await sleep(25000);
     }
   }
 
