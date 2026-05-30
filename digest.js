@@ -105,10 +105,10 @@ Return ONLY valid JSON — no markdown, no preamble, no backticks — in exactly
 }
 
 Rules:
-- Include 4-5 items per topic section
+- Include 3 items per topic section
 - geo must be exactly "france" or "world"
 - Use ${langLabel} for all titles and summaries
-- Each summary must be 3-4 sentences with context, background, and significance (detailed 10-min read)
+- Each summary must be 2-3 sentences with key context and significance
 - Keep summaries neutral and factual
 - Include real source names and URLs when available
 - Every story must be genuinely new today`;
@@ -122,7 +122,7 @@ Rules:
     },
     body: JSON.stringify({
       model: "claude-sonnet-4-5",
-      max_tokens: 4000,
+      max_tokens: 2000,
       tools: [{ type: "web_search_20250305", name: "web_search" }],
       messages: [{ role: "user", content: prompt }],
     }),
@@ -256,7 +256,7 @@ async function sendViaGmail(subject, htmlBody) {
 }
 
 // ─── Retry helper ────────────────────────────────────────────────────────────
-async function withRetry(fn, retries = 3, delayMs = 10000) {
+async function withRetry(fn, retries = 3, delayMs = 60000) {
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
       return await fn();
