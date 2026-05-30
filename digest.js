@@ -1,8 +1,8 @@
 /**
  * Daily News Digest — Automated
- * Fetches news via Claude AI (with web search),
- * formats a rich HTML email, and sends it via Gmail OAuth2.
- * Designed to be triggered by Railway Cron Job.
+ * Fetches headlines via FREE RSS feeds (no token cost),
+ * summarizes with Claude (minimal tokens),
+ * sends via Gmail OAuth2.
  */
 
 require("dotenv").config();
@@ -15,8 +15,6 @@ const CONFIG = {
   recipientEmail: process.env.RECIPIENT_EMAIL,
   timezone: process.env.TIMEZONE || "America/New_York",
   language: process.env.LANGUAGE || "en",
-  summaryLength: process.env.SUMMARY_LENGTH || "detailed",
-  topics: (process.env.TOPICS || "General news,Politics,Tech & Science,Business,Culture & Sports").split(","),
   anthropicKey: process.env.ANTHROPIC_API_KEY,
   gmailClientId: process.env.GMAIL_CLIENT_ID,
   gmailClientSecret: process.env.GMAIL_CLIENT_SECRET,
@@ -24,7 +22,23 @@ const CONFIG = {
   senderEmail: process.env.SENDER_EMAIL,
 };
 
-// ─── Memory: store & load past headlines (last 7 days) ───────────────────────
+// ─── RSS Feed Sources ─────────────────────────────────────────────────────────
+const RSS_FEEDS = [
+  // France
+  { url: "https://www.lemonde.fr/rss/une.xml",          topic: "General news",     geo: "france", source: "Le Monde" },
+  { url: "https://www.lefigaro.fr/rss/figaro_actualites.xml", topic: "General news", geo: "france", source: "Le Figaro" },
+  { url: "https://www.france24.com/fr/rss",             topic: "Politics",         geo: "france", source: "France 24" },
+  { url: "https://www.lesechos.fr/rss/rss_une.xml",     topic: "Business",         geo: "france", source: "Les Echos" },
+  // World
+  { url: "https://feeds.bbci.co.uk/news/rss.xml",       topic: "General news",     geo: "world",  source: "BBC News" },
+  { url: "https://feeds.reuters.com/reuters/topNews",   topic: "General news",     geo: "world",  source: "Reuters" },
+  { url: "https://rss.nytimes.com/services/xml/rss/nyt/World.xml", topic: "Politics", geo: "world", source: "NY Times" },
+  { url: "https://feeds.feedburner.com/TechCrunch",     topic: "Tech & Science",   geo: "world",  source: "TechCrunch" },
+  { url: "https://www.wired.com/feed/rss",              topic: "Tech & Science",   geo: "world",  source: "Wired" },
+  { url: "https://feeds.bloomberg.com/markets/news.rss",topic: "Business",         geo: "world",  source: "Bloomberg" },
+];
+
+// ─── Memory ───────────────────────────────────────────────────────────────────
 const MEMORY_FILE = path.join("/tmp", "digest_memory.json");
 const MEMORY_DAYS = 7;
 
@@ -33,71 +47,104 @@ function loadMemory() {
     if (fs.existsSync(MEMORY_FILE)) {
       const data = JSON.parse(fs.readFileSync(MEMORY_FILE, "utf8"));
       const cutoff = Date.now() - MEMORY_DAYS * 24 * 60 * 60 * 1000;
-      return data.filter((entry) => entry.timestamp > cutoff);
+      return data.filter((e) => e.timestamp > cutoff);
     }
-  } catch (e) {
-    console.log("  Could not load memory, starting fresh.");
-  }
+  } catch (e) {}
   return [];
 }
 
 function saveMemory(memory, newTitles) {
   const now = Date.now();
-  const newEntries = newTitles.map((title) => ({ title, timestamp: now }));
-  const updated = [...memory, ...newEntries];
+  const updated = [...memory, ...newTitles.map((t) => ({ title: t, timestamp: now }))];
   const cutoff = now - MEMORY_DAYS * 24 * 60 * 60 * 1000;
-  const trimmed = updated.filter((e) => e.timestamp > cutoff);
   try {
-    fs.writeFileSync(MEMORY_FILE, JSON.stringify(trimmed, null, 2));
-    console.log(`  Memory updated (${trimmed.length} headlines stored)`);
-  } catch (e) {
-    console.log("  Could not save memory:", e.message);
-  }
+    fs.writeFileSync(MEMORY_FILE, JSON.stringify(updated.filter((e) => e.timestamp > cutoff), null, 2));
+  } catch (e) {}
 }
 
-// ─── Fetch news via Claude + web search ──────────────────────────────────────
-async function fetchDigest(pastHeadlines) {
-  const langLabel = CONFIG.language === "fr" ? "French" : CONFIG.language === "en" ? "English" : "French and English";
+// ─── Step 1: Fetch RSS headlines ──────────────────────────────────────────────
+async function fetchRSSHeadlines(pastTitles) {
+  const allItems = [];
+  const cutoff = Date.now() - 48 * 60 * 60 * 1000; // last 48 hours
+
+  for (const feed of RSS_FEEDS) {
+    try {
+      const res = await fetch(feed.url, {
+        headers: { "User-Agent": "Mozilla/5.0 (compatible; NewsDigest/1.0)" },
+        signal: AbortSignal.timeout(8000),
+      });
+      const xml = await res.text();
+
+      // Simple XML item parser
+      const items = [];
+      const itemMatches = xml.matchAll(/<item>([\s\S]*?)<\/item>/g);
+      for (const match of itemMatches) {
+        const block = match[1];
+        const title = block.match(/<title[^>]*><!\[CDATA\[(.*?)\]\]><\/title>|<title[^>]*>(.*?)<\/title>/)?.[1] || block.match(/<title[^>]*>(.*?)<\/title>/)?.[1] || "";
+        const desc = block.match(/<description[^>]*><!\[CDATA\[(.*?)\]\]><\/description>|<description[^>]*>(.*?)<\/description>/)?.[1] || "";
+        const link = block.match(/<link>(.*?)<\/link>|<link[^>]*href="([^"]+)"/)?.[1] || "";
+        const pubDate = block.match(/<pubDate>(.*?)<\/pubDate>/)?.[1] || "";
+
+        const cleanTitle = title.replace(/<[^>]+>/g, "").trim();
+        const cleanDesc = desc.replace(/<[^>]+>/g, "").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').trim().slice(0, 300);
+
+        if (!cleanTitle) continue;
+        if (pastTitles.some((t) => t.toLowerCase().includes(cleanTitle.toLowerCase().slice(0, 20)))) continue;
+
+        const pub = pubDate ? new Date(pubDate).getTime() : Date.now();
+        if (pubDate && pub < cutoff) continue;
+
+        items.push({ title: cleanTitle, description: cleanDesc, link, topic: feed.topic, geo: feed.geo, source: feed.source });
+        if (items.length >= 3) break;
+      }
+
+      allItems.push(...items);
+      console.log(`  RSS ${feed.source}: ${items.length} items`);
+    } catch (e) {
+      console.log(`  RSS ${feed.source}: failed (${e.message})`);
+    }
+  }
+
+  return allItems;
+}
+
+// ─── Step 2: Summarize with Claude (minimal tokens) ──────────────────────────
+async function summarizeWithClaude(headlines) {
+  // Group by topic
+  const byTopic = {};
+  for (const item of headlines) {
+    if (!byTopic[item.topic]) byTopic[item.topic] = [];
+    if (byTopic[item.topic].length < 3) byTopic[item.topic].push(item);
+  }
+
+  const topics = Object.keys(byTopic);
+  const inputText = topics.map((topic) =>
+    `TOPIC: ${topic}\n` + byTopic[topic].map((i, n) =>
+      `${n + 1}. [${i.geo}] ${i.source}: ${i.title}. ${i.description}`
+    ).join("\n")
+  ).join("\n\n");
 
   const today = new Date().toLocaleDateString("en-US", {
     weekday: "long", year: "numeric", month: "long", day: "numeric",
     timeZone: CONFIG.timezone,
   });
 
-  const exclusionBlock = pastHeadlines.length > 0
-    ? `Do NOT repeat these recent headlines:\n${pastHeadlines.map((t) => `- ${t}`).join("\n")}\n`
-    : "";
+  const prompt = `Summarize these news headlines into a daily digest. For each item write a clear 2-sentence summary in English.
 
-  const prompt = `You are a news digest assistant. Search the web for the most recent news from France and worldwide on these topics: ${CONFIG.topics.join(", ")}.
+${inputText}
 
-Use the most recent articles you can find from the past 48 hours.
-${exclusionBlock}
-You MUST respond with ONLY a valid JSON object. Do not write any explanation, apology, or text outside the JSON. Always return JSON no matter what.
-
-Format:
+Return ONLY valid JSON:
 {
   "date": "${today}",
   "sections": [
     {
-      "topic": "General news",
+      "topic": "Topic name",
       "items": [
-        {
-          "title": "Headline",
-          "summary": "Two to three sentence summary with context and significance.",
-          "geo": "france",
-          "source": "Source name",
-          "url": "https://example.com"
-        }
+        {"title": "headline", "summary": "2 sentence summary.", "geo": "france or world", "source": "source name", "url": ""}
       ]
     }
   ]
-}
-
-Rules:
-- geo = "france" for French news, "world" for international
-- 3 items per section
-- All text in ${langLabel}
-- Valid JSON only, no prose, no apologies, no markdown`;
+}`;
 
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
@@ -107,9 +154,8 @@ Rules:
       "anthropic-version": "2023-06-01",
     },
     body: JSON.stringify({
-      model: "claude-sonnet-4-5",
-      max_tokens: 2000,
-      tools: [{ type: "web_search_20250305", name: "web_search" }],
+      model: "claude-haiku-4-5-20251001",
+      max_tokens: 1500,
       messages: [{ role: "user", content: prompt }],
     }),
   });
@@ -117,24 +163,18 @@ Rules:
   if (!res.ok) throw new Error(`Anthropic API error: ${res.status} ${await res.text()}`);
   const data = await res.json();
 
-  let jsonText = "";
-  for (const block of data.content) {
-    if (block.type === "text") jsonText += block.text;
-  }
+  let jsonText = data.content.filter((b) => b.type === "text").map((b) => b.text).join("");
+  console.log("  Claude response length:", jsonText.length);
 
-  console.log("  Raw response length:", jsonText.length);
   jsonText = jsonText.replace(/```json|```/g, "").trim();
   const start = jsonText.indexOf("{");
   const end = jsonText.lastIndexOf("}");
-  if (start === -1 || end === -1) {
-    console.log("  Full response:", jsonText.slice(0, 300));
-    throw new Error("No JSON found in response");
-  }
+  if (start === -1 || end === -1) throw new Error("No JSON in Claude response: " + jsonText.slice(0, 200));
 
   return JSON.parse(jsonText.slice(start, end + 1));
 }
 
-// ─── Build HTML email ─────────────────────────────────────────────────────────
+// ─── Step 3: Build HTML email ─────────────────────────────────────────────────
 function buildEmail(digest) {
   const topicIcons = {
     "General news": "📰", "Politics": "🏛️",
@@ -178,14 +218,14 @@ function buildEmail(digest) {
         <table width="100%" cellpadding="0" cellspacing="0" border="0">${sectionHtml}</table>
       </td></tr>
       <tr><td style="background:#f0eff8;border-radius:0 0 12px 12px;padding:16px 32px;text-align:center;">
-        <p style="margin:0;font-size:12px;color:#888;">Automated digest · ${CONFIG.topics.join(" · ")}</p>
+        <p style="margin:0;font-size:12px;color:#888;">Automated digest · Sent daily at 8:30am EST</p>
       </td></tr>
     </table></td></tr>
   </table>
 </body></html>`;
 }
 
-// ─── Send via Gmail OAuth2 ────────────────────────────────────────────────────
+// ─── Step 4: Send via Gmail OAuth2 ───────────────────────────────────────────
 async function sendViaGmail(subject, htmlBody) {
   const oauth2Client = new google.auth.OAuth2(
     CONFIG.gmailClientId, CONFIG.gmailClientSecret,
@@ -217,11 +257,17 @@ async function main() {
   console.log(`[${now}] Starting news digest...`);
 
   const memory = loadMemory();
-  const pastHeadlines = memory.map((e) => e.title);
-  console.log(`  Loaded ${pastHeadlines.length} past headlines to avoid`);
+  const pastTitles = memory.map((e) => e.title);
+  console.log(`  Loaded ${pastTitles.length} past headlines to avoid`);
 
-  console.log("  Fetching news via Claude + web search...");
-  const digest = await fetchDigest(pastHeadlines);
+  console.log("  Fetching RSS headlines...");
+  const headlines = await fetchRSSHeadlines(pastTitles);
+  console.log(`  Got ${headlines.length} total headlines from RSS`);
+
+  if (headlines.length === 0) throw new Error("No RSS headlines fetched");
+
+  console.log("  Summarizing with Claude (no web search)...");
+  const digest = await summarizeWithClaude(headlines);
   console.log(`  Got ${digest.sections.length} sections`);
 
   const newTitles = digest.sections.flatMap((s) => s.items.map((i) => i.title));
