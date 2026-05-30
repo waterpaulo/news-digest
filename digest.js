@@ -81,37 +81,12 @@ async function fetchDigest(pastHeadlines) {
     ? `\nIMPORTANT — Do NOT include any story that is the same or very similar to these headlines from the past ${MEMORY_DAYS} days:\n${pastHeadlines.map((t) => `- ${t}`).join("\n")}\nPrioritize fresh, new developments only.\n`
     : "";
 
-  const prompt = `You are a professional news editor creating a ${CONFIG.summaryLength} daily digest for ${today}.
-
-Search the web for today's top news from France and worldwide covering these topics: ${CONFIG.topics.join(", ")}.
+  const prompt = `News editor. Create daily digest for ${today}. Search web for top news from France and worldwide on: ${CONFIG.topics.join(", ")}.
 ${exclusionBlock}
-Return ONLY valid JSON — no markdown, no preamble, no backticks — in exactly this structure:
-{
-  "date": "${today}",
-  "sections": [
-    {
-      "topic": "Topic name",
-      "items": [
-        {
-          "title": "Headline",
-          "summary": "1-2 sentence factual summary.",
-          "geo": "france",
-          "source": "Source name",
-          "url": "https://..."
-        }
-      ]
-    }
-  ]
-}
+Return ONLY valid JSON, no markdown:
+{"date":"${today}","sections":[{"topic":"Topic","items":[{"title":"Headline","summary":"2 sentence summary.","geo":"france or world","source":"Source","url":"https://..."}]}]}
 
-Rules:
-- Include 3 items per topic section
-- geo must be exactly "france" or "world"
-- Use ${langLabel} for all titles and summaries
-- Each summary must be 2-3 sentences with key context and significance
-- Keep summaries neutral and factual
-- Include real source names and URLs when available
-- Every story must be genuinely new today`;
+Rules: 3 items per topic. geo = "france" or "world". Language: ${langLabel}. Neutral and factual. New stories only.`;
 
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
@@ -121,8 +96,8 @@ Rules:
       "anthropic-version": "2023-06-01",
     },
     body: JSON.stringify({
-      model: "claude-sonnet-4-5",
-      max_tokens: 2000,
+      model: "claude-haiku-4-5-20251001",
+      max_tokens: 1500,
       tools: [{ type: "web_search_20250305", name: "web_search" }],
       messages: [{ role: "user", content: prompt }],
     }),
