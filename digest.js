@@ -81,13 +81,13 @@ async function fetchDigest(pastHeadlines) {
     ? `\nIMPORTANT — Do NOT include any story that is the same or very similar to these headlines from the past ${MEMORY_DAYS} days:\n${pastHeadlines.map((t) => `- ${t}`).join("\n")}\nPrioritize fresh, new developments only.\n`
     : "";
 
-  const prompt = `You are a news editor. Search the web for today's top news (${today}) from France and worldwide.
+  const prompt = `You are a news digest assistant. Search the web for the most recent news from France and worldwide on these topics: ${CONFIG.topics.join(", ")}.
 
-Topics to cover: ${CONFIG.topics.join(", ")}.
+Use the most recent articles you can find — from the past 48 hours is fine.
 ${exclusionBlock}
-CRITICAL: Respond with ONLY a JSON object. No text before or after. No markdown. No backticks.
+You MUST respond with ONLY a valid JSON object. Do not write any explanation, apology, or text outside the JSON. If you cannot find news for a topic, include placeholder items. Always return JSON.
 
-The JSON must follow this exact format:
+Format:
 {
   "date": "${today}",
   "sections": [
@@ -95,17 +95,10 @@ The JSON must follow this exact format:
       "topic": "General news",
       "items": [
         {
-          "title": "News headline here",
-          "summary": "Two sentence summary of the story with key context.",
+          "title": "Headline",
+          "summary": "Two sentence summary with context.",
           "geo": "france",
-          "source": "Le Monde",
-          "url": "https://example.com"
-        },
-        {
-          "title": "Another headline",
-          "summary": "Two sentence summary here.",
-          "geo": "world",
-          "source": "Reuters",
+          "source": "Source name",
           "url": "https://example.com"
         }
       ]
@@ -113,12 +106,11 @@ The JSON must follow this exact format:
   ]
 }
 
-Important rules:
-- geo must be exactly the string "france" or the string "world", nothing else
-- Include exactly 3 items per topic section
-- Write all text in ${langLabel}
-- Only include real news from today
-- The entire response must be valid JSON only`;
+Rules:
+- geo = "france" for French news, "world" for international
+- 3 items per section
+- All text in ${langLabel}
+- Valid JSON only — no prose, no apologies, no markdown`;
 
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
