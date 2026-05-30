@@ -81,12 +81,44 @@ async function fetchDigest(pastHeadlines) {
     ? `\nIMPORTANT — Do NOT include any story that is the same or very similar to these headlines from the past ${MEMORY_DAYS} days:\n${pastHeadlines.map((t) => `- ${t}`).join("\n")}\nPrioritize fresh, new developments only.\n`
     : "";
 
-  const prompt = `News editor. Create daily digest for ${today}. Search web for top news from France and worldwide on: ${CONFIG.topics.join(", ")}.
-${exclusionBlock}
-Return ONLY valid JSON, no markdown:
-{"date":"${today}","sections":[{"topic":"Topic","items":[{"title":"Headline","summary":"2 sentence summary.","geo":"france or world","source":"Source","url":"https://..."}]}]}
+  const prompt = `You are a news editor. Search the web for today's top news (${today}) from France and worldwide.
 
-Rules: 3 items per topic. geo = "france" or "world". Language: ${langLabel}. Neutral and factual. New stories only.`;
+Topics to cover: ${CONFIG.topics.join(", ")}.
+${exclusionBlock}
+CRITICAL: Respond with ONLY a JSON object. No text before or after. No markdown. No backticks.
+
+The JSON must follow this exact format:
+{
+  "date": "${today}",
+  "sections": [
+    {
+      "topic": "General news",
+      "items": [
+        {
+          "title": "News headline here",
+          "summary": "Two sentence summary of the story with key context.",
+          "geo": "france",
+          "source": "Le Monde",
+          "url": "https://example.com"
+        },
+        {
+          "title": "Another headline",
+          "summary": "Two sentence summary here.",
+          "geo": "world",
+          "source": "Reuters",
+          "url": "https://example.com"
+        }
+      ]
+    }
+  ]
+}
+
+Important rules:
+- geo must be exactly the string "france" or the string "world", nothing else
+- Include exactly 3 items per topic section
+- Write all text in ${langLabel}
+- Only include real news from today
+- The entire response must be valid JSON only`;
 
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
