@@ -96,12 +96,25 @@ Topics must be one of: General news, Politics, Tech & Science, Business, Culture
       const data = await res.json();
 
       let jsonText = data.content.filter((b) => b.type === "text").map((b) => b.text).join("");
+      console.log(`  Raw ${search.label} response (first 200):`, jsonText.slice(0, 200));
       jsonText = jsonText.replace(/```json|```/g, "").trim();
-      const start = jsonText.indexOf("[");
-      const end = jsonText.lastIndexOf("]");
-      if (start === -1 || end === -1) throw new Error("No JSON array in response");
 
-      const items = JSON.parse(jsonText.slice(start, end + 1));
+      // Try array first, then object with items key
+      let items = [];
+      const arrStart = jsonText.indexOf("[");
+      const arrEnd = jsonText.lastIndexOf("]");
+      const objStart = jsonText.indexOf("{");
+      const objEnd = jsonText.lastIndexOf("}");
+
+      if (arrStart !== -1 && arrEnd !== -1) {
+        items = JSON.parse(jsonText.slice(arrStart, arrEnd + 1));
+      } else if (objStart !== -1 && objEnd !== -1) {
+        const obj = JSON.parse(jsonText.slice(objStart, objEnd + 1));
+        items = obj.items || obj.headlines || obj.news || Object.values(obj)[0] || [];
+      } else {
+        throw new Error("No JSON found in response");
+      }
+
       const geo = search.label === "France" ? "france" : "world";
       allItems.push(...items.map((i) => ({ ...i, geo })));
       console.log(`  ✓ ${search.label}: ${items.length} headlines`);
