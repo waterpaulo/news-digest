@@ -58,17 +58,11 @@ async function fetchRawNews(pastTitles, today) {
   const searches = [
     {
       label: "France",
-      prompt: `Search for today's top 6 news headlines from France (${today}) covering: politics, economy, general news, culture. ${exclusion}
-Return ONLY a JSON array, no markdown:
-[{"title":"headline","description":"1 sentence description","source":"source name","url":"https://...","topic":"Politics"}]
-Topics must be one of: General news, Politics, Business, Culture & Sports. JSON array only.`
+      prompt: `Search for today's top 6 news headlines from France (${today}) covering politics, economy, general news, culture. ${exclusion} List them clearly with title, source, and a one sentence description.`
     },
     {
       label: "World",
-      prompt: `Search for today's top 6 world news headlines (${today}) covering: tech, science, business, international politics, culture. ${exclusion}
-Return ONLY a JSON array, no markdown:
-[{"title":"headline","description":"1 sentence description","source":"source name","url":"https://...","topic":"Tech & Science"}]
-Topics must be one of: General news, Politics, Tech & Science, Business, Culture & Sports. JSON array only.`
+      prompt: `Search for today's top 6 world news headlines (${today}) covering tech, science, business, international politics, culture. ${exclusion} List them clearly with title, source, and a one sentence description.`
     }
   ];
 
@@ -95,26 +89,40 @@ Topics must be one of: General news, Politics, Tech & Science, Business, Culture
       if (!res.ok) throw new Error(`API ${res.status}: ${await res.text()}`);
       const data = await res.json();
 
-      let jsonText = data.content.filter((b) => b.type === "text").map((b) => b.text).join("");
-      console.log(`  Raw ${search.label} response (first 200):`, jsonText.slice(0, 200));
-      jsonText = jsonText.replace(/```json|```/g, "").trim();
+      // Get the raw text response
+      const rawText = data.content.filter((b) => b.type === "text").map((b) => b.text).join("");
+      console.log(`  Raw ${search.label} (first 150):`, rawText.slice(0, 150));
 
-      // Try array first, then object with items key
-      let items = [];
+      // Second call to Haiku to convert the text into JSON (cheap, no web search)
+      const convertRes = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": CONFIG.anthropicKey,
+          "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify({
+          model: "claude-haiku-4-5-20251001",
+          max_tokens: 1000,
+          messages: [{
+            role: "user",
+            content: `Convert this news list into a JSON array. Return ONLY the JSON array, nothing else, no markdown, no backticks.
+
+Format: [{"title":"...","description":"one sentence","source":"...","url":"...","topic":"one of: General news, Politics, Tech & Science, Business, Culture & Sports"}]
+
+News list:
+${rawText}`
+          }],
+        }),
+      });
+      const convertData = await convertRes.json();
+      let jsonText = convertData.content.filter((b) => b.type === "text").map((b) => b.text).join("");
+      jsonText = jsonText.replace(/\`\`\`json|\`\`\`/g, "").trim();
       const arrStart = jsonText.indexOf("[");
       const arrEnd = jsonText.lastIndexOf("]");
-      const objStart = jsonText.indexOf("{");
-      const objEnd = jsonText.lastIndexOf("}");
+      if (arrStart === -1 || arrEnd === -1) throw new Error("Haiku could not convert to JSON");
 
-      if (arrStart !== -1 && arrEnd !== -1) {
-        items = JSON.parse(jsonText.slice(arrStart, arrEnd + 1));
-      } else if (objStart !== -1 && objEnd !== -1) {
-        const obj = JSON.parse(jsonText.slice(objStart, objEnd + 1));
-        items = obj.items || obj.headlines || obj.news || Object.values(obj)[0] || [];
-      } else {
-        throw new Error("No JSON found in response");
-      }
-
+      const items = JSON.parse(jsonText.slice(arrStart, arrEnd + 1));
       const geo = search.label === "France" ? "france" : "world";
       allItems.push(...items.map((i) => ({ ...i, geo })));
       console.log(`  ✓ ${search.label}: ${items.length} headlines`);
