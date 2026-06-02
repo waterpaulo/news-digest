@@ -130,13 +130,14 @@ ${rawText}`
       console.log(`  ✗ ${search.label}: ${e.message}`);
     }
 
-    // Wait 20s between the 2 searches
-    if (search.label === "France") {
+    // Wait 20s between searches
+    if (search.label !== searches[searches.length - 1].label) {
       console.log("  Waiting 20s...");
-      await sleep(20000);
+      await sleep(30000);
     }
   }
 
+  console.log(`  All searches complete. Total headlines: ${allItems.length}`);
   return allItems;
 }
 
@@ -312,6 +313,13 @@ async function main() {
   const rawItems = await fetchRawNews(pastTitles, today);
   console.log(`  Got ${rawItems.length} raw headlines`);
   if (rawItems.length === 0) throw new Error("No headlines fetched");
+
+  // Check we have both France and world news
+  const hasFrance = rawItems.some((i) => i.geo === "france");
+  const hasWorld = rawItems.some((i) => i.geo === "world");
+  if (!hasFrance) console.log("  ⚠ Warning: No France headlines fetched");
+  if (!hasWorld) console.log("  ⚠ Warning: No World headlines fetched");
+  if (!hasFrance && !hasWorld) throw new Error("Neither France nor World headlines fetched - aborting");
 
   // Step 2: Summarize (Haiku, no web search = cheap)
   console.log("  Step 2: Summarizing with Haiku...");
