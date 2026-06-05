@@ -79,7 +79,7 @@ async function fetchRawNews(pastTitles, today) {
           "anthropic-version": "2023-06-01",
         },
         body: JSON.stringify({
-          model: "claude-sonnet-4-6",
+          model: "claude-haiku-4-5-20251001",
           max_tokens: 1000,
           tools: [{ type: "web_search_20250305", name: "web_search" }],
           messages: [{ role: "user", content: search.prompt }],
@@ -133,7 +133,7 @@ ${rawText}`
     // Wait 20s between searches
     if (search.label !== searches[searches.length - 1].label) {
       console.log("  Waiting 20s...");
-      await sleep(30000);
+      await sleep(45000);
     }
   }
 
