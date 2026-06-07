@@ -79,7 +79,7 @@ async function fetchRawNews(pastTitles, today) {
           "anthropic-version": "2023-06-01",
         },
         body: JSON.stringify({
-          model: "claude-haiku-4-5-20251001",
+          model: "claude-sonnet-4-6",
           max_tokens: 1000,
           tools: [{ type: "web_search_20250305", name: "web_search" }],
           messages: [{ role: "user", content: search.prompt }],
@@ -88,6 +88,10 @@ async function fetchRawNews(pastTitles, today) {
 
       if (!res.ok) throw new Error(`API ${res.status}: ${await res.text()}`);
       const data = await res.json();
+
+      if (!data.content || !Array.isArray(data.content)) {
+        throw new Error(`Unexpected API response: ${JSON.stringify(data).slice(0, 200)}`);
+      }
 
       // Get the raw text response
       const rawText = data.content.filter((b) => b.type === "text").map((b) => b.text).join("");
@@ -133,7 +137,7 @@ ${rawText}`
     // Wait 20s between searches
     if (search.label !== searches[searches.length - 1].label) {
       console.log("  Waiting 20s...");
-      await sleep(45000);
+      await sleep(60000);
     }
   }
 
