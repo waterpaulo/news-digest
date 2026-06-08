@@ -136,7 +136,7 @@ ${rawText}`
 
     // Wait 20s between searches
     if (search.label !== searches[searches.length - 1].label) {
-      console.log("  Waiting 20s...");
+      console.log("  Waiting 60s...");
       await sleep(60000);
     }
   }
@@ -272,13 +272,26 @@ function buildEmail(digest) {
 </body></html>`;
 }
 
-// ─── Step 4: Send via Gmail OAuth2 ───────────────────────────────────────────
+// ─── Step 4: Send via Gmail OAuth2 (with auto token refresh) ─────────────────
 async function sendViaGmail(subject, htmlBody) {
   const oauth2Client = new google.auth.OAuth2(
-    CONFIG.gmailClientId, CONFIG.gmailClientSecret,
+    CONFIG.gmailClientId,
+    CONFIG.gmailClientSecret,
     "https://developers.google.com/oauthplayground"
   );
+
+  // Set refresh token and force a fresh access token every time
   oauth2Client.setCredentials({ refresh_token: CONFIG.gmailRefreshToken });
+
+  // Explicitly refresh the access token before sending
+  try {
+    const { credentials } = await oauth2Client.refreshAccessToken();
+    oauth2Client.setCredentials(credentials);
+    console.log("  Gmail access token refreshed successfully");
+  } catch (err) {
+    throw new Error(`Gmail token refresh failed: ${err.message}. Please generate a new refresh token at https://developers.google.com/oauthplayground`);
+  }
+
   const gmail = google.gmail({ version: "v1", auth: oauth2Client });
 
   const message = [
