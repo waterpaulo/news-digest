@@ -55,9 +55,9 @@ async function fetchRawNews(pastTitles, today) {
     ? `Avoid these recent stories: ${pastTitles.slice(0, 8).join("; ")}.`
     : "";
 
-  const prompt = `Search the web for today's top news headlines (${today}). Find 10 headlines from France and 10 international headlines, covering a wide range of topics including politics, economy, tech, science, business, culture, and sports.
+  const prompt = `Search the web for today's top news headlines (${today}). Find 6 headlines from France and 6 international headlines, covering politics, economy, tech, business, culture, and sports.
 ${exclusion}
-List them clearly with title, source, and a brief description for each.`;
+List them with title, source, and one sentence description.`;
 
   console.log("  Searching: France & World news...");
 
@@ -70,7 +70,7 @@ List them clearly with title, source, and a brief description for each.`;
     },
     body: JSON.stringify({
       model: "claude-sonnet-4-6",
-      max_tokens: 3000,
+      max_tokens: 2000,
       tools: [{ type: "web_search_20250305", name: "web_search" }],
       messages: [{ role: "user", content: prompt }],
     }),
@@ -96,22 +96,19 @@ List them clearly with title, source, and a brief description for each.`;
     },
     body: JSON.stringify({
       model: "claude-haiku-4-5-20251001",
-      max_tokens: 2000,
+      max_tokens: 1500,
       messages: [{
         role: "user",
-        content: `Convert this news list into a JSON array. Mark French stories with geo="france" and international with geo="world". Return ONLY the JSON array, no markdown.
-
-Format: [{"title":"...","description":"one sentence","source":"...","url":"...","geo":"france or world","topic":"one of: General news, Politics, Tech & Science, Business, Culture & Sports"}]
-
-News list:
-${rawText}`
+        content: `Convert this news list into a JSON array. Mark French stories geo="france", international geo="world". Return ONLY the JSON array, no markdown, no backticks.
+[{"title":"...","description":"one sentence","source":"...","url":"...","geo":"france or world","topic":"General news or Politics or Tech & Science or Business or Culture & Sports"}]
+News: ${rawText.slice(0, 2000)}`
       }],
     }),
   });
 
   const convertData = await convertRes.json();
   let jsonText = convertData.content.filter((b) => b.type === "text").map((b) => b.text).join("");
-  jsonText = jsonText.replace(/\`\`\`json|\`\`\`/g, "").trim();
+  jsonText = jsonText.replace(/```json|```/g, "").trim();
   const arrStart = jsonText.indexOf("[");
   const arrEnd = jsonText.lastIndexOf("]");
   if (arrStart === -1 || arrEnd === -1) throw new Error("Could not convert to JSON");
