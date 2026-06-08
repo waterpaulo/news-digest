@@ -49,100 +49,79 @@ function saveMemory(memory, newTitles) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// ─── Step 1: 2 web searches — France news + World news ───────────────────────
+// ─── Step 1: Single web search for all news ──────────────────────────────────
 async function fetchRawNews(pastTitles, today) {
   const exclusion = pastTitles.length > 0
     ? `Avoid these recent stories: ${pastTitles.slice(0, 8).join("; ")}.`
     : "";
 
-  const searches = [
-    {
-      label: "France",
-      prompt: `Search for today's top 6 news headlines from France (${today}) covering politics, economy, general news, culture. ${exclusion} List them clearly with title, source, and a one sentence description.`
+  const prompt = `Search the web for today's top news headlines (${today}). Find 10 headlines from France and 10 international headlines, covering a wide range of topics including politics, economy, tech, science, business, culture, and sports.
+${exclusion}
+List them clearly with title, source, and a brief description for each.`;
+
+  console.log("  Searching: France & World news...");
+
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": CONFIG.anthropicKey,
+      "anthropic-version": "2023-06-01",
     },
-    {
-      label: "World",
-      prompt: `Search for today's top 6 world news headlines (${today}) covering tech, science, business, international politics, culture. ${exclusion} List them clearly with title, source, and a one sentence description.`
-    }
-  ];
+    body: JSON.stringify({
+      model: "claude-sonnet-4-6",
+      max_tokens: 3000,
+      tools: [{ type: "web_search_20250305", name: "web_search" }],
+      messages: [{ role: "user", content: prompt }],
+    }),
+  });
 
-  const allItems = [];
+  if (!res.ok) throw new Error(`API ${res.status}: ${await res.text()}`);
+  const data = await res.json();
 
-  for (const search of searches) {
-    console.log(`  Searching: ${search.label} news...`);
-    try {
-      const res = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-api-key": CONFIG.anthropicKey,
-          "anthropic-version": "2023-06-01",
-        },
-        body: JSON.stringify({
-          model: "claude-sonnet-4-6",
-          max_tokens: 1000,
-          tools: [{ type: "web_search_20250305", name: "web_search" }],
-          messages: [{ role: "user", content: search.prompt }],
-        }),
-      });
+  if (!data.content || !Array.isArray(data.content)) {
+    throw new Error(`Unexpected API response: ${JSON.stringify(data).slice(0, 200)}`);
+  }
 
-      if (!res.ok) throw new Error(`API ${res.status}: ${await res.text()}`);
-      const data = await res.json();
+  const rawText = data.content.filter((b) => b.type === "text").map((b) => b.text).join("");
+  console.log(`  Raw response (first 150):`, rawText.slice(0, 150));
 
-      if (!data.content || !Array.isArray(data.content)) {
-        throw new Error(`Unexpected API response: ${JSON.stringify(data).slice(0, 200)}`);
-      }
+  // Convert to JSON using Haiku
+  const convertRes = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": CONFIG.anthropicKey,
+      "anthropic-version": "2023-06-01",
+    },
+    body: JSON.stringify({
+      model: "claude-haiku-4-5-20251001",
+      max_tokens: 2000,
+      messages: [{
+        role: "user",
+        content: `Convert this news list into a JSON array. Mark French stories with geo="france" and international with geo="world". Return ONLY the JSON array, no markdown.
 
-      // Get the raw text response
-      const rawText = data.content.filter((b) => b.type === "text").map((b) => b.text).join("");
-      console.log(`  Raw ${search.label} (first 150):`, rawText.slice(0, 150));
-
-      // Second call to Haiku to convert the text into JSON (cheap, no web search)
-      const convertRes = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-api-key": CONFIG.anthropicKey,
-          "anthropic-version": "2023-06-01",
-        },
-        body: JSON.stringify({
-          model: "claude-haiku-4-5-20251001",
-          max_tokens: 1000,
-          messages: [{
-            role: "user",
-            content: `Convert this news list into a JSON array. Return ONLY the JSON array, nothing else, no markdown, no backticks.
-
-Format: [{"title":"...","description":"one sentence","source":"...","url":"...","topic":"one of: General news, Politics, Tech & Science, Business, Culture & Sports"}]
+Format: [{"title":"...","description":"one sentence","source":"...","url":"...","geo":"france or world","topic":"one of: General news, Politics, Tech & Science, Business, Culture & Sports"}]
 
 News list:
 ${rawText}`
-          }],
-        }),
-      });
-      const convertData = await convertRes.json();
-      let jsonText = convertData.content.filter((b) => b.type === "text").map((b) => b.text).join("");
-      jsonText = jsonText.replace(/\`\`\`json|\`\`\`/g, "").trim();
-      const arrStart = jsonText.indexOf("[");
-      const arrEnd = jsonText.lastIndexOf("]");
-      if (arrStart === -1 || arrEnd === -1) throw new Error("Haiku could not convert to JSON");
+      }],
+    }),
+  });
 
-      const items = JSON.parse(jsonText.slice(arrStart, arrEnd + 1));
-      const geo = search.label === "France" ? "france" : "world";
-      allItems.push(...items.map((i) => ({ ...i, geo })));
-      console.log(`  ✓ ${search.label}: ${items.length} headlines`);
-    } catch (e) {
-      console.log(`  ✗ ${search.label}: ${e.message}`);
-    }
+  const convertData = await convertRes.json();
+  let jsonText = convertData.content.filter((b) => b.type === "text").map((b) => b.text).join("");
+  jsonText = jsonText.replace(/\`\`\`json|\`\`\`/g, "").trim();
+  const arrStart = jsonText.indexOf("[");
+  const arrEnd = jsonText.lastIndexOf("]");
+  if (arrStart === -1 || arrEnd === -1) throw new Error("Could not convert to JSON");
 
-    // Wait 20s between searches
-    if (search.label !== searches[searches.length - 1].label) {
-      console.log("  Waiting 60s...");
-      await sleep(60000);
-    }
-  }
+  const items = JSON.parse(jsonText.slice(arrStart, arrEnd + 1));
+  const hasFrance = items.some((i) => i.geo === "france");
+  const hasWorld = items.some((i) => i.geo === "world");
+  console.log(`  ✓ Got ${items.length} headlines (France: ${hasFrance}, World: ${hasWorld})`);
 
-  console.log(`  All searches complete. Total headlines: ${allItems.length}`);
-  return allItems;
+  return items;
 }
 
 // ─── Step 2: Summarize with Haiku (cheapest model) ───────────────────────────
@@ -203,7 +182,7 @@ Return ONLY valid JSON:
     },
     body: JSON.stringify({
       model: "claude-haiku-4-5-20251001",
-      max_tokens: 2000,
+      max_tokens: 3000,
       messages: [{ role: "user", content: prompt }],
     }),
   });
