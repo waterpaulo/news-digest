@@ -1,7 +1,8 @@
 /**
  * Daily News Digest — Automated
- * Fetches news via Claude Sonnet + web search,
- * summarized by Haiku, sent via Resend (no OAuth, never expires).
+ * Fetches headlines from free RSS feeds (zero API tokens),
+ * summarizes with Claude Haiku (cheap, fast, low token usage),
+ * sends via Resend (never expires).
  */
 
 require("dotenv").config();
@@ -17,6 +18,22 @@ const CONFIG = {
   resendKey: process.env.RESEND_API_KEY,
   topics: (process.env.TOPICS || "General news,Politics,Tech & Science,Business,Culture & Sports").split(","),
 };
+
+// ─── RSS Sources ──────────────────────────────────────────────────────────────
+const RSS_FEEDS = [
+  { url: "https://www.lemonde.fr/rss/une.xml",                          geo: "france", topic: "General news",   source: "Le Monde" },
+  { url: "https://www.lefigaro.fr/rss/figaro_actualites.xml",           geo: "france", topic: "Politics",       source: "Le Figaro" },
+  { url: "https://www.lesechos.fr/rss/rss_une.xml",                     geo: "france", topic: "Business",       source: "Les Echos" },
+  { url: "https://www.france24.com/fr/rss",                             geo: "france", topic: "General news",   source: "France 24" },
+  { url: "https://feeds.bbci.co.uk/news/world/rss.xml",                 geo: "world",  topic: "General news",   source: "BBC News" },
+  { url: "https://feeds.bbci.co.uk/news/technology/rss.xml",            geo: "world",  topic: "Tech & Science", source: "BBC Tech" },
+  { url: "https://feeds.bbci.co.uk/news/business/rss.xml",              geo: "world",  topic: "Business",       source: "BBC Business" },
+  { url: "https://rss.nytimes.com/services/xml/rss/nyt/World.xml",      geo: "world",  topic: "Politics",       source: "NY Times" },
+  { url: "https://feeds.feedburner.com/TechCrunch",                     geo: "world",  topic: "Tech & Science", source: "TechCrunch" },
+  { url: "https://www.wired.com/feed/rss",                              geo: "world",  topic: "Tech & Science", source: "Wired" },
+  { url: "https://feeds.bloomberg.com/markets/news.rss",                geo: "world",  topic: "Business",       source: "Bloomberg" },
+  { url: "https://rss.nytimes.com/services/xml/rss/nyt/Arts.xml",       geo: "world",  topic: "Culture & Sports", source: "NY Times Arts" },
+];
 
 // ─── Memory ───────────────────────────────────────────────────────────────────
 const MEMORY_FILE = path.join("/tmp", "digest_memory.json");
@@ -42,8 +59,70 @@ function saveMemory(memory, newTitles) {
   } catch (e) {}
 }
 
-// ─── API call with auto-retry on rate limit ───────────────────────────────────
-async function callAnthropic(body, attempt = 1) {
+// ─── Step 1: Fetch RSS headlines (zero token cost) ────────────────────────────
+async function fetchRSSHeadlines(pastTitles) {
+  const headlines = [];
+  const seen = new Set(pastTitles.map(t => t.toLowerCase().slice(0, 30)));
+
+  for (const feed of RSS_FEEDS) {
+    try {
+      const res = await fetch(feed.url, {
+        headers: { "User-Agent": "Mozilla/5.0 (compatible; NewsDigest/1.0)" },
+        signal: AbortSignal.timeout(6000),
+      });
+      const xml = await res.text();
+
+      let count = 0;
+      const itemMatches = xml.matchAll(/<item>([\s\S]*?)<\/item>/g);
+      for (const match of itemMatches) {
+        if (count >= 2) break;
+        const block = match[1];
+        const titleMatch = block.match(/<title[^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?<\/title>/s);
+        const descMatch = block.match(/<description[^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?<\/description>/s);
+        const linkMatch = block.match(/<link>(.*?)<\/link>/s);
+
+        const title = (titleMatch?.[1] || "").replace(/<[^>]+>/g, "").trim();
+        const desc = (descMatch?.[1] || "").replace(/<[^>]+>/g, "").replace(/&amp;/g,"&").replace(/&lt;/g,"<").replace(/&gt;/g,">").replace(/&quot;/g,'"').trim().slice(0, 200);
+        const url = (linkMatch?.[1] || "").trim();
+
+        if (!title || seen.has(title.toLowerCase().slice(0, 30))) continue;
+        seen.add(title.toLowerCase().slice(0, 30));
+
+        headlines.push({ title, description: desc, url, geo: feed.geo, topic: feed.topic, source: feed.source });
+        count++;
+      }
+      console.log(`  RSS ${feed.source}: ${count} items`);
+    } catch (e) {
+      console.log(`  RSS ${feed.source}: failed`);
+    }
+  }
+
+  return headlines;
+}
+
+// ─── Step 2: Summarize with Haiku (tiny token usage) ─────────────────────────
+async function summarize(headlines, today) {
+  // Group by topic, max 3 per topic
+  const byTopic = {};
+  for (const item of headlines) {
+    if (!byTopic[item.topic]) byTopic[item.topic] = [];
+    if (byTopic[item.topic].length < 3) byTopic[item.topic].push(item);
+  }
+  // Fill missing topics
+  for (const topic of CONFIG.topics) {
+    if (!byTopic[topic]?.length) {
+      const fallback = Object.values(byTopic).flat().filter(i => !Object.values(byTopic).flat().includes(i));
+      byTopic[topic] = fallback.slice(0, 2);
+    }
+  }
+
+  const inputText = CONFIG.topics
+    .filter(t => byTopic[t]?.length > 0)
+    .map(t => `TOPIC: ${t}\n` + byTopic[t].map((i,n) =>
+      `${n+1}. [${i.geo}][${i.source}] ${i.title}. ${i.description}`
+    ).join("\n"))
+    .join("\n\n");
+
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -51,110 +130,35 @@ async function callAnthropic(body, attempt = 1) {
       "x-api-key": CONFIG.anthropicKey,
       "anthropic-version": "2023-06-01",
     },
-    body: JSON.stringify(body),
-  });
+    body: JSON.stringify({
+      model: "claude-haiku-4-5-20251001",
+      max_tokens: 3000,
+      messages: [{
+        role: "user",
+        content: `Write a 2-3 sentence summary for each news item below. Be factual and informative. Return ONLY valid JSON, no markdown:
+{"date":"${today}","sections":[{"topic":"...","items":[{"title":"...","summary":"2-3 sentences.","geo":"france or world","source":"...","url":"..."}]}]}
 
-  // Rate limit — wait and retry automatically
-  if (res.status === 429) {
-    if (attempt > 5) throw new Error("Rate limit: too many retries");
-    const waitSec = attempt * 30; // 30s, 60s, 90s, 120s, 150s
-    console.log(`  Rate limit hit. Waiting ${waitSec}s (attempt ${attempt}/5)...`);
-    await new Promise((r) => setTimeout(r, waitSec * 1000));
-    return callAnthropic(body, attempt + 1);
-  }
-
-  if (!res.ok) throw new Error(`API ${res.status}: ${await res.text()}`);
-  const data = await res.json();
-  if (!data.content || !Array.isArray(data.content)) {
-    throw new Error(`Unexpected response: ${JSON.stringify(data).slice(0, 200)}`);
-  }
-  return data;
-}
-
-// ─── Step 1: Fetch news via web search ───────────────────────────────────────
-async function fetchRawNews(pastTitles, today) {
-  const exclusion = pastTitles.length > 0
-    ? `Avoid these recent stories: ${pastTitles.slice(0, 8).join("; ")}.`
-    : "";
-
-  const prompt = `Search the web for today's top news headlines (${today}). Find 6 headlines from France and 6 international headlines covering politics, economy, tech, business, culture, and sports. ${exclusion} List them with title, source, and one sentence description.`;
-
-  console.log("  Searching: France & World news...");
-  const data = await callAnthropic({
-    model: "claude-sonnet-4-5",
-    max_tokens: 2000,
-    tools: [{ type: "web_search_20250305", name: "web_search" }],
-    messages: [{ role: "user", content: prompt }],
-  });
-
-  const rawText = data.content.filter((b) => b.type === "text").map((b) => b.text).join("");
-  console.log(`  Raw response (first 100):`, rawText.slice(0, 100));
-
-  // Convert to structured JSON via Haiku
-  const convertData = await callAnthropic({
-    model: "claude-haiku-4-5-20251001",
-    max_tokens: 1500,
-    messages: [{
-      role: "user",
-      content: `Convert this news list to a JSON array. French stories: geo="france", international: geo="world". Return ONLY the JSON array, no markdown.
-Format: [{"title":"...","description":"...","source":"...","url":"...","geo":"france or world","topic":"General news or Politics or Tech & Science or Business or Culture & Sports"}]
-News: ${rawText.slice(0, 2000)}`
-    }],
-  });
-
-  let jsonText = convertData.content.filter((b) => b.type === "text").map((b) => b.text).join("");
-  jsonText = jsonText.replace(/```json|```/g, "").trim();
-  const s = jsonText.indexOf("["), e = jsonText.lastIndexOf("]");
-  if (s === -1 || e === -1) throw new Error("Could not parse headlines JSON");
-
-  const items = JSON.parse(jsonText.slice(s, e + 1));
-  console.log(`  Got ${items.length} headlines (France: ${items.some(i => i.geo === "france")}, World: ${items.some(i => i.geo === "world")})`);
-  return items;
-}
-
-// ─── Step 2: Summarize with Haiku ────────────────────────────────────────────
-async function summarize(rawItems, today) {
-  const byTopic = {};
-  for (const item of rawItems) {
-    const topic = item.topic || "General news";
-    if (!byTopic[topic]) byTopic[topic] = [];
-    if (byTopic[topic].length < 3) byTopic[topic].push(item);
-  }
-  for (const topic of CONFIG.topics) {
-    if (!byTopic[topic]?.length) byTopic[topic] = (byTopic["General news"] || []).slice(0, 2);
-  }
-
-  const inputText = CONFIG.topics
-    .filter((t) => byTopic[t]?.length > 0)
-    .map((t) => `TOPIC: ${t}\n` + byTopic[t].map((i, n) => `${n+1}. [${i.geo}] ${i.source}: ${i.title}. ${i.description || ""}`).join("\n"))
-    .join("\n\n");
-
-  const data = await callAnthropic({
-    model: "claude-haiku-4-5-20251001",
-    max_tokens: 3000,
-    messages: [{
-      role: "user",
-      content: `Write a 2-3 sentence summary for each news item. Return ONLY valid JSON:
-{"date":"${today}","sections":[{"topic":"...","items":[{"title":"...","summary":"...","geo":"france or world","source":"...","url":"..."}]}]}
-
-News items:
 ${inputText}`
-    }],
+      }],
+    }),
   });
 
-  let jsonText = data.content.filter((b) => b.type === "text").map((b) => b.text).join("");
-  console.log("  Haiku response length:", jsonText.length);
+  if (!res.ok) throw new Error(`Haiku error: ${res.status} ${await res.text()}`);
+  const data = await res.json();
+
+  let jsonText = data.content.filter(b => b.type === "text").map(b => b.text).join("");
+  console.log("  Haiku response:", jsonText.length, "chars");
   jsonText = jsonText.replace(/```json|```/g, "").trim();
   const s = jsonText.indexOf("{"), e = jsonText.lastIndexOf("}");
-  if (s === -1 || e === -1) throw new Error("No JSON from Haiku");
+  if (s === -1 || e === -1) throw new Error("No JSON from Haiku: " + jsonText.slice(0, 200));
   return JSON.parse(jsonText.slice(s, e + 1));
 }
 
 // ─── Step 3: Build HTML email ─────────────────────────────────────────────────
 function buildEmail(digest) {
-  const icons = { "General news":"📰","Politics":"🏛️","Tech & Science":"🔬","Business":"📈","Culture & Sports":"🎭" };
-  const sectionHtml = digest.sections.map((section) => {
-    const itemsHtml = section.items.map((item) => {
+  const icons = {"General news":"📰","Politics":"🏛️","Tech & Science":"🔬","Business":"📈","Culture & Sports":"🎭"};
+  const sectionHtml = digest.sections.map(section => {
+    const itemsHtml = section.items.map(item => {
       const geo = item.geo === "france" ? "🇫🇷 France" : "🌍 World";
       const titleHtml = item.url ? `<a href="${item.url}" style="color:#3C3489;text-decoration:none;">${item.title}</a>` : item.title;
       return `<tr><td style="padding:12px 0;border-bottom:1px solid #f0f0f0;">
@@ -188,19 +192,17 @@ function buildEmail(digest) {
 }
 
 // ─── Step 4: Send via Resend ──────────────────────────────────────────────────
-async function sendEmail(subject, htmlBody, date) {
+async function sendEmail(subject, html) {
   const resend = new Resend(CONFIG.resendKey);
   const recipients = CONFIG.recipientEmail.split(",").map(e => e.trim());
-
   const { error } = await resend.emails.send({
     from: `News Digest <${CONFIG.senderEmail}>`,
     to: recipients,
     subject,
-    html: htmlBody,
+    html,
   });
-
   if (error) throw new Error(`Resend error: ${JSON.stringify(error)}`);
-  console.log(`  Email sent to ${recipients.join(", ")}`);
+  console.log(`  Sent to ${recipients.join(", ")}`);
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
@@ -214,28 +216,28 @@ async function main() {
   });
 
   const memory = loadMemory();
-  const pastTitles = memory.map((e) => e.title);
+  const pastTitles = memory.map(e => e.title);
   console.log(`  Loaded ${pastTitles.length} past headlines to avoid`);
 
-  console.log("  Step 1: Fetching headlines...");
-  const rawItems = await fetchRawNews(pastTitles, today);
-  if (!rawItems.length) throw new Error("No headlines fetched");
+  console.log("  Step 1: Fetching RSS headlines...");
+  const headlines = await fetchRSSHeadlines(pastTitles);
+  console.log(`  Got ${headlines.length} headlines total`);
+  if (!headlines.length) throw new Error("No headlines fetched from RSS");
 
-  console.log("  Step 2: Summarizing...");
-  const digest = await summarize(rawItems, today);
+  console.log("  Step 2: Summarizing with Haiku...");
+  const digest = await summarize(headlines, today);
   console.log(`  Got ${digest.sections.length} sections`);
 
-  saveMemory(memory, digest.sections.flatMap((s) => s.items.map((i) => i.title)));
+  saveMemory(memory, digest.sections.flatMap(s => s.items.map(i => i.title)));
 
   console.log("  Step 3: Sending via Resend...");
-  const html = buildEmail(digest);
-  await sendEmail(`📰 Daily Digest — ${digest.date}`, html, digest.date);
+  await sendEmail(`📰 Daily Digest — ${digest.date}`, buildEmail(digest));
 
   console.log("  Done!");
   process.exit(0);
 }
 
-main().catch((err) => {
+main().catch(err => {
   console.error("Fatal error:", err.message);
   process.exit(1);
 });
