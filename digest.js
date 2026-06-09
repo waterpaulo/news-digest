@@ -136,7 +136,7 @@ async function summarize(headlines, today) {
     },
     body: JSON.stringify({
       model: "claude-haiku-4-5-20251001",
-      max_tokens: 2500,
+      max_tokens: 4000,
       messages: [{
         role: "user",
         content: `Write a 3-4 sentence detailed summary for each news item. Include key facts, context, and why it matters. IMPORTANT: preserve the exact [url:...] value for each item in the url field. Return ONLY valid JSON, no markdown:
