@@ -1,0 +1,33 @@
+name: Daily News Digest
+
+on:
+  schedule:
+    - cron: '30 12 * * *'  # 8:30am EST (12:30 UTC)
+  workflow_dispatch:        # allows manual trigger from GitHub UI
+
+jobs:
+  send-digest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run digest
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
+          SENDER_EMAIL: ${{ secrets.SENDER_EMAIL }}
+          TIMEZONE: America/New_York
+          TOPICS: General news,Politics,Tech & Science,Business,Culture & Sports
+        run: node digest.js
