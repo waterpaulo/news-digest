@@ -75,7 +75,7 @@ async function fetchRSSHeadlines(pastTitles) {
       let count = 0;
       const itemMatches = xml.matchAll(/<item>([\s\S]*?)<\/item>/g);
       for (const match of itemMatches) {
-        if (count >= 2) break;
+        if (count >= 1) break;
         const block = match[1];
         const titleMatch = block.match(/<title[^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?<\/title>/s);
         const descMatch = block.match(/<description[^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?<\/description>/s);
@@ -116,12 +116,11 @@ async function summarize(headlines, today) {
     }
   }
 
+  // Minimal input to keep Haiku fast
   const inputText = CONFIG.topics
     .filter(t => byTopic[t]?.length > 0)
-    .map(t => `TOPIC: ${t}\n` + byTopic[t].map((i,n) =>
-      `${n+1}. [${i.geo}][${i.source}] ${i.title}. ${i.description}`
-    ).join("\n"))
-    .join("\n\n");
+    .map(t => `${t}: ` + byTopic[t].slice(0,2).map(i => `[${i.geo}] ${i.title}`).join(" | "))
+    .join("\n");
 
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
@@ -132,12 +131,11 @@ async function summarize(headlines, today) {
     },
     body: JSON.stringify({
       model: "claude-haiku-4-5-20251001",
-      max_tokens: 3000,
+      max_tokens: 1500,
       messages: [{
         role: "user",
-        content: `Write a 2-3 sentence summary for each news item below. Be factual and informative. Return ONLY valid JSON, no markdown:
-{"date":"${today}","sections":[{"topic":"...","items":[{"title":"...","summary":"2-3 sentences.","geo":"france or world","source":"...","url":"..."}]}]}
-
+        content: `Summarize these news headlines for ${today}. Return ONLY JSON, no markdown:
+{"date":"${today}","sections":[{"topic":"General news","items":[{"title":"headline","summary":"One sentence.","geo":"france","source":"source","url":""}]}]}
 ${inputText}`
       }],
     }),
