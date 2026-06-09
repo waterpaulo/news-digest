@@ -79,11 +79,14 @@ async function fetchRSSHeadlines(pastTitles) {
         const block = match[1];
         const titleMatch = block.match(/<title[^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?<\/title>/s);
         const descMatch = block.match(/<description[^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?<\/description>/s);
-        const linkMatch = block.match(/<link>(.*?)<\/link>/s);
+        // Try multiple URL patterns in RSS
+        const linkMatch = block.match(/<link>(?:<!\[CDATA\[)?(https?:\/\/[^\]<\s]+)/) ||
+                          block.match(/<link[^>]+href="(https?:\/\/[^"]+)"/) ||
+                          block.match(/<guid[^>]*>(https?:\/\/[^<]+)<\/guid>/);
 
         const title = (titleMatch?.[1] || "").replace(/<[^>]+>/g, "").trim();
         const desc = (descMatch?.[1] || "").replace(/<[^>]+>/g, "").replace(/&amp;/g,"&").replace(/&lt;/g,"<").replace(/&gt;/g,">").replace(/&quot;/g,'"').trim().slice(0, 200);
-        const url = (linkMatch?.[1] || "").trim();
+        const url = (linkMatch?.[1] || linkMatch?.[2] || "").trim();
 
         if (!title || seen.has(title.toLowerCase().slice(0, 30))) continue;
         seen.add(title.toLowerCase().slice(0, 30));
@@ -120,7 +123,7 @@ async function summarize(headlines, today) {
   const inputText = CONFIG.topics
     .filter(t => byTopic[t]?.length > 0)
     .map(t => `TOPIC: ${t}\n` + byTopic[t].slice(0,2).map((i,n) =>
-      `${n+1}. [${i.geo}][${i.source}] ${i.title}. ${i.description}`
+      `${n+1}. [${i.geo}][${i.source}][url:${i.url}] ${i.title}. ${i.description}`
     ).join("\n"))
     .join("\n\n");
 
@@ -136,8 +139,8 @@ async function summarize(headlines, today) {
       max_tokens: 2500,
       messages: [{
         role: "user",
-        content: `Write a 3-4 sentence detailed summary for each news item. Include key facts, context, and why it matters. Return ONLY valid JSON, no markdown:
-{"date":"${today}","sections":[{"topic":"General news","items":[{"title":"exact original headline","summary":"3-4 detailed sentences with full context.","geo":"france","source":"source name","url":"article url"}]}]}
+        content: `Write a 3-4 sentence detailed summary for each news item. Include key facts, context, and why it matters. IMPORTANT: preserve the exact [url:...] value for each item in the url field. Return ONLY valid JSON, no markdown:
+{"date":"${today}","sections":[{"topic":"General news","items":[{"title":"exact original headline","summary":"3-4 detailed sentences with full context.","geo":"france","source":"source name","url":"exact url from [url:...] tag"}]}]}
 
 News items:
 ${inputText}`
