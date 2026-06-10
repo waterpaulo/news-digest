@@ -75,7 +75,7 @@ async function fetchRSSHeadlines(pastTitles) {
       let count = 0;
       const itemMatches = xml.matchAll(/<item>([\s\S]*?)<\/item>/g);
       for (const match of itemMatches) {
-        if (count >= 2) break;
+        if (count >= 3) break;
         const block = match[1];
         const titleMatch = block.match(/<title[^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?<\/title>/s);
         const descMatch = block.match(/<description[^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?<\/description>/s);
@@ -123,7 +123,7 @@ async function summarize(headlines, today) {
   for (const item of dedupedItems) {
     const topic = item.topic || "General news";
     if (!byTopic[topic]) byTopic[topic] = [];
-    if (byTopic[topic].length < 2) byTopic[topic].push(item);
+    if (byTopic[topic].length < 3) byTopic[topic].push(item);
   }
   // Fill missing topics with unused items
   const allUsed = new Set(Object.values(byTopic).flat().map(i => i.title));
