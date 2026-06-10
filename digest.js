@@ -105,11 +105,15 @@ async function fetchRSSHeadlines(pastTitles) {
 
 // ─── Step 2: Summarize with Haiku (tiny token usage) ─────────────────────────
 async function summarize(headlines, today) {
-  // Deduplicate headlines globally first
+  // Deduplicate headlines globally — remove exact and near-duplicate titles
   const usedTitles = new Set();
   const dedupedItems = headlines.filter(item => {
-    const key = item.title.toLowerCase().slice(0, 40);
-    if (usedTitles.has(key)) return false;
+    // Use first 60 chars as key, normalized
+    const key = item.title.toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 60);
+    // Also check if any existing key contains this one (near-duplicate)
+    for (const used of usedTitles) {
+      if (used.includes(key.slice(0, 30)) || key.includes(used.slice(0, 30))) return false;
+    }
     usedTitles.add(key);
     return true;
   });
@@ -150,8 +154,15 @@ async function summarize(headlines, today) {
       max_tokens: 4000,
       messages: [{
         role: "user",
-        content: `You are a news editor. Write a 3-4 sentence detailed summary in ENGLISH for each news item below. Include key facts, context, and why it matters. IMPORTANT: preserve the exact [url:...] value for each item in the url field. Use ONLY the topic names exactly as given. Each story must appear ONLY ONCE across all sections — do not repeat the same story in multiple topics. Return ONLY valid JSON, no markdown:
-{"date":"${today}","sections":[{"topic":"General news","items":[{"title":"exact original headline in English","summary":"3-4 detailed sentences in English.","geo":"france","source":"source name","url":"exact url from [url:...] tag"}]}]}
+        content: `You are a news editor creating an English-language digest. For each news item:
+1. TRANSLATE the title to English if it is in French or another language
+2. Write a 3-4 sentence summary IN ENGLISH with full context and why it matters
+3. Copy the exact URL from the [url:...] tag into the url field
+4. Each story must appear ONLY ONCE — never repeat the same story in multiple topics
+5. Use topic names EXACTLY as provided
+
+Return ONLY valid JSON, no markdown, no backticks:
+{"date":"${today}","sections":[{"topic":"General news","items":[{"title":"English translation of headline","summary":"3-4 sentences in English.","geo":"france","source":"source name","url":"exact url from [url:...] tag"}]}]}
 
 News items:
 ${inputText}`
