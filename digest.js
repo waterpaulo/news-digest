@@ -154,15 +154,16 @@ async function summarize(headlines, today) {
       max_tokens: 4000,
       messages: [{
         role: "user",
-        content: `You are a news editor creating an English-language digest. For each news item:
-1. TRANSLATE the title to English if it is in French or another language
-2. Write a 3-4 sentence summary IN ENGLISH with full context and why it matters
+        content: `You are a news editor creating an English-language digest. Follow these rules strictly:
+
+1. TRANSLATE all titles to English
+2. Write 3-4 sentence summaries IN ENGLISH with full context
 3. Copy the exact URL from the [url:...] tag into the url field
-4. Each story must appear ONLY ONCE — never repeat the same story in multiple topics
+4. CRITICAL: If two or more items are about the SAME EVENT or SAME STORY (even from different sources), include it ONLY ONCE under the most relevant topic — skip the duplicates entirely
 5. Use topic names EXACTLY as provided
 
 Return ONLY valid JSON, no markdown, no backticks:
-{"date":"${today}","sections":[{"topic":"General news","items":[{"title":"English translation of headline","summary":"3-4 sentences in English.","geo":"france","source":"source name","url":"exact url from [url:...] tag"}]}]}
+{"date":"${today}","sections":[{"topic":"General news","items":[{"title":"English headline","summary":"3-4 sentences in English.","geo":"france","source":"source name","url":"url from [url:...] tag"}]}]}
 
 News items:
 ${inputText}`
