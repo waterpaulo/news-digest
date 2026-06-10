@@ -105,17 +105,28 @@ async function fetchRSSHeadlines(pastTitles) {
 
 // ─── Step 2: Summarize with Haiku (tiny token usage) ─────────────────────────
 async function summarize(headlines, today) {
-  // Group by topic, max 3 per topic
+  // Deduplicate headlines globally first
+  const usedTitles = new Set();
+  const dedupedItems = headlines.filter(item => {
+    const key = item.title.toLowerCase().slice(0, 40);
+    if (usedTitles.has(key)) return false;
+    usedTitles.add(key);
+    return true;
+  });
+
+  // Group by topic, max 2 per topic
   const byTopic = {};
-  for (const item of headlines) {
-    if (!byTopic[item.topic]) byTopic[item.topic] = [];
-    if (byTopic[item.topic].length < 3) byTopic[item.topic].push(item);
+  for (const item of dedupedItems) {
+    const topic = item.topic || "General news";
+    if (!byTopic[topic]) byTopic[topic] = [];
+    if (byTopic[topic].length < 2) byTopic[topic].push(item);
   }
-  // Fill missing topics
+  // Fill missing topics with unused items
+  const allUsed = new Set(Object.values(byTopic).flat().map(i => i.title));
+  const unused = dedupedItems.filter(i => !allUsed.has(i.title));
   for (const topic of CONFIG.topics) {
-    if (!byTopic[topic]?.length) {
-      const fallback = Object.values(byTopic).flat().filter(i => !Object.values(byTopic).flat().includes(i));
-      byTopic[topic] = fallback.slice(0, 2);
+    if (!byTopic[topic]?.length && unused.length > 0) {
+      byTopic[topic] = unused.splice(0, 2);
     }
   }
 
@@ -139,8 +150,8 @@ async function summarize(headlines, today) {
       max_tokens: 4000,
       messages: [{
         role: "user",
-        content: `Write a 3-4 sentence detailed summary for each news item. Include key facts, context, and why it matters. IMPORTANT: preserve the exact [url:...] value for each item in the url field. Return ONLY valid JSON, no markdown:
-{"date":"${today}","sections":[{"topic":"General news","items":[{"title":"exact original headline","summary":"3-4 detailed sentences with full context.","geo":"france","source":"source name","url":"exact url from [url:...] tag"}]}]}
+        content: `You are a news editor. Write a 3-4 sentence detailed summary in ENGLISH for each news item below. Include key facts, context, and why it matters. IMPORTANT: preserve the exact [url:...] value for each item in the url field. Use ONLY the topic names exactly as given. Each story must appear ONLY ONCE across all sections — do not repeat the same story in multiple topics. Return ONLY valid JSON, no markdown:
+{"date":"${today}","sections":[{"topic":"General news","items":[{"title":"exact original headline in English","summary":"3-4 detailed sentences in English.","geo":"france","source":"source name","url":"exact url from [url:...] tag"}]}]}
 
 News items:
 ${inputText}`
