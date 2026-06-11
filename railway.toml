@@ -1,6 +1,0 @@
-[deploy]
-startCommand = "node digest.js"
-healthcheckTimeout = 300
-
-[cron]
-timeout = 300
