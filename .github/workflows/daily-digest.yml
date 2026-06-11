@@ -2,8 +2,10 @@ name: Daily News Digest
 
 on:
   schedule:
-    - cron: '30 12 * * *'  # 8:30am EST (12:30 UTC)
-  workflow_dispatch:        # allows manual trigger from GitHub UI
+    - cron: '30 12 * * *'  # 8:30am EDT (12:30 UTC)
+  workflow_dispatch:        # manual trigger from GitHub UI
+  push:
+    branches: [main]        # also runs on every commit (temporary, to verify)
 
 jobs:
   send-digest:
