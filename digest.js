@@ -1,4 +1,4 @@
-/**
+/** 
  * Daily News Digest — Automated
  * Fetches headlines from free RSS feeds (zero API tokens),
  * summarizes with Claude Haiku (cheap, fast, low token usage),
